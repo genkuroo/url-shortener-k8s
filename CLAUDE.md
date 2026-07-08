@@ -52,24 +52,33 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 
 ## Current state (as of 2026-07-08)
 
-**Phase 2 complete — ingress-nginx front door.** Phase 1 built the cluster and
-raw manifests (Namespace, Postgres StatefulSet + headless Service + 1Gi PVC,
-ConfigMap + Secret, app Deployment + ClusterIP Service, probes, init container).
-Phase 2 added ingress-nginx (kind provider, v1.15.1, vendored in
-`k8s/ingress-nginx/controller.yaml`) plus `k8s/40-ingress.yaml` routing
-`urlshortener.localtest.me` → the app Service. One local edit to the vendored
-manifest: re-added the `ingress-ready=true` nodeSelector (dropped upstream in
-v1.15.1) so the controller pins to the control-plane node, the only one whose
-host ports 80/443 are forwarded (see `kind-config.yaml`). Verified end-to-end
-through the ingress host: UI, API, and short-link 307 redirects. Tooling:
-`kind`/`kubectl` via Homebrew; `helm` not needed until Phase 3.
+**Phase 3 complete — Helm chart, dev + prod releases.** The raw manifests were
+converted into a chart under `charts/url-shortener/` (`Chart.yaml`, `values.yaml`,
+`templates/` for config/secret, postgres, app, ingress, plus `_helpers.tpl` and
+`NOTES.txt`). A `_helpers.tpl` scopes every object's name to the release
+(`<release>-url-shortener[-postgres]`) and stamps the standard
+`app.kubernetes.io/*` labels, so two installs never collide. `POSTGRES_HOST` is
+computed from the release name, so each release's app points at its own database.
 
-`make up` now does: cluster → build/load image → ingress-install → deploy.
-Note `kubectl apply -f k8s/` is non-recursive, so it applies `00–40` but skips
-the vendored `ingress-nginx/` subdir (installed separately by `make ingress-install`).
+Two overlays: `values-dev.yaml` (1 replica, 512Mi PVC,
+`dev.urlshortener.localtest.me`) and `values-prod.yaml` (3 replicas, CPU/mem
+requests+limits, `urlshortener.localtest.me`). Installed as two releases —
+`dev` in ns `url-shortener-dev`, `prod` in ns `url-shortener-prod`. Verified
+side by side end-to-end (redirects/stats/healthz on both hosts, isolated data).
 
-Next: **Phase 3** — convert the raw manifests into a Helm chart
-(`charts/url-shortener`) with `values.yaml` + dev/prod overlays.
+Migration note: the old Phase 1/2 `url-shortener` namespace (raw-manifest deploy)
+owned the prod host, so the first `prod` install failed on the ingress admission
+webhook (duplicate host+path). Deleted that superseded namespace, re-applied
+prod. The raw `k8s/00–40` manifests stay in the repo as the reference the chart
+was derived from; `k8s/ingress-nginx/` is still installed directly (cluster-level
+infra, not part of the app chart).
+
+`make up` now does: cluster → build/load image → ingress-install → `helm-dev` +
+`helm-prod` (both via `helm upgrade --install`). New targets: `lint`, `template`,
+`helm-dev`, `helm-prod`, `uninstall`, `seed-dev`. Tooling: `kind`/`kubectl`/`helm`
+via Homebrew (helm v4.2.2).
+
+Next: **Phase 4** — GitOps with Argo CD pointing at `charts/url-shortener`.
 
 ## Conventions
 

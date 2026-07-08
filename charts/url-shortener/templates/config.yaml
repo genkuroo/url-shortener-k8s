@@ -1,0 +1,33 @@
+# ConfigMap + Secret — config split by sensitivity, same as the raw manifests.
+#
+#   ConfigMap  — non-secret settings (host, port, db name, username).
+#   Secret     — the one sensitive value (the database password).
+#
+# The password lives in exactly one place (the Secret); the app assembles its
+# full DATABASE_URL from these pieces at runtime (see app.yaml). Both objects are
+# named off the release's fullname so two releases never collide.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "url-shortener.fullname" . }}-config
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+data:
+  # The app reaches Postgres at the headless Service's name, computed from the
+  # release so dev and prod each point at their own database.
+  POSTGRES_HOST: {{ include "url-shortener.postgres.fullname" . }}
+  POSTGRES_PORT: {{ .Values.config.postgresPort | quote }}
+  POSTGRES_DB: {{ .Values.config.postgresDb }}
+  POSTGRES_USER: {{ .Values.config.postgresUser }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "url-shortener.fullname" . }}-secret
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  # stringData: written plaintext here, base64-encoded by Kubernetes on the way
+  # in. Local-dev password only (see values.yaml).
+  POSTGRES_PASSWORD: {{ .Values.secret.postgresPassword | quote }}

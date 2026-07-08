@@ -28,42 +28,55 @@ GHCR**. App inside the container: **Python + FastAPI** talking to **Postgres**.
 
 ## Run it (on a local Kubernetes cluster)
 
-Needs Docker, [`kind`](https://kind.sigs.k8s.io/), and `kubectl`. The `Makefile`
-wraps the whole workflow (`make help` lists every target):
+Needs Docker, [`kind`](https://kind.sigs.k8s.io/), `kubectl`, and
+[`helm`](https://helm.sh/). The `Makefile` wraps the whole workflow
+(`make help` lists every target):
 
 ```bash
-make up            # cluster + image + ingress-nginx + app manifests
-make seed          # add demo links + clicks (through the ingress)
-open http://urlshortener.localtest.me      # use the app — no port-forward
+make up            # cluster + image + ingress-nginx, then helm installs dev + prod
+make seed          # add demo links + clicks to prod (make seed-dev for dev)
+open http://urlshortener.localtest.me          # prod  — no port-forward
+open http://dev.urlshortener.localtest.me      # dev   — the same chart, 1 replica
 make down          # delete the whole cluster
 ```
 
-`urlshortener.localtest.me` is a real domain that resolves to `127.0.0.1`, so it
-reaches the in-cluster **ingress-nginx** controller with no `/etc/hosts` edits.
-(`make port-forward` still works as a fallback if you'd rather not use ingress.)
+The app is packaged as a **Helm chart** (`charts/url-shortener`) and installed as
+**two releases from the same chart**: a lean `dev` (1 replica, smaller volume) in
+`url-shortener-dev` and a bigger `prod` (3 replicas, resource requests/limits) in
+`url-shortener-prod`. Only the values differ (`values-dev.yaml` /
+`values-prod.yaml`); the templates are identical. `helm list -A` shows both.
+
+`urlshortener.localtest.me` / `dev.urlshortener.localtest.me` are real domains
+that resolve to `127.0.0.1`, so they reach the in-cluster **ingress-nginx**
+controller with no `/etc/hosts` edits, and ingress-nginx routes each host to the
+right release. (`make port-forward` still works as a fallback.)
 
 **Prove the state model** — the app is stateless, the database isn't:
 
 ```bash
-kubectl -n url-shortener delete pod -l app=url-shortener   # kill an app pod
-kubectl -n url-shortener delete pod postgres-0             # kill the database pod
+kubectl -n url-shortener-prod delete pod -l app.kubernetes.io/component=app  # kill an app pod
+kubectl -n url-shortener-prod delete pod prod-url-shortener-postgres-0       # kill the database pod
 # ...both come back; the links + click counts are still there. The data lives on
 # the StatefulSet's PersistentVolumeClaim, not in any pod.
 ```
 
 ### What's in the cluster
 
-- **Namespace** `url-shortener` — everything grouped under one name.
-- **Postgres** as a **StatefulSet** + headless Service + a 1Gi **PVC** — stable
+The Helm chart renders, per release:
+
+- **Postgres** as a **StatefulSet** + headless Service + a **PVC** — stable
   identity and its own disk, so data outlives the pod.
-- The app as a 2-replica **Deployment** + ClusterIP **Service**, with
-  **liveness/readiness probes** on `/healthz` and an init container that waits
-  for Postgres before starting.
+- The app as a **Deployment** (replica count per environment) + ClusterIP
+  **Service**, with **liveness/readiness probes** on `/healthz` and an init
+  container that waits for Postgres before starting.
 - A **ConfigMap** (non-secret settings) + **Secret** (DB password); the app
   assembles `DATABASE_URL` from both at runtime.
-- **ingress-nginx** controller (vendored in `k8s/ingress-nginx/`, pinned to
-  v1.15.1) + an **Ingress** routing `urlshortener.localtest.me` to the app
-  Service — the cluster's public front door.
+- An **Ingress** routing the release's hostname to its app Service.
+
+Cluster-level (installed once, outside the chart): the **ingress-nginx**
+controller (vendored in `k8s/ingress-nginx/`, pinned to v1.15.1). The original
+raw manifests are kept in `k8s/` as the Phase 1/2 reference the chart was
+derived from.
 
 ### Try it without Kubernetes (Phase 0 smoke test)
 
@@ -76,4 +89,5 @@ docker compose down
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 2 (ingress-nginx front door).** Helm packaging is next.
+**Currently: Phase 3 (Helm chart, dev + prod releases).** GitOps with Argo CD is
+next.

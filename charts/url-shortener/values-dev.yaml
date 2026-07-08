@@ -1,0 +1,15 @@
+# values-dev.yaml — the "dev" environment overlay.
+#
+# Layered on top of values.yaml with:
+#   helm install dev charts/url-shortener -n url-shortener-dev -f values-dev.yaml
+# Only the fields that differ from the defaults appear here. Dev is deliberately
+# small: a single app replica, no resource caps, its own hostname and a smaller
+# database volume — cheap and fast to spin up.
+app:
+  replicas: 1
+
+postgres:
+  storage: 512Mi
+
+ingress:
+  host: dev.urlshortener.localtest.me

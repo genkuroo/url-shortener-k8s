@@ -1,0 +1,27 @@
+{{- if .Values.ingress.enabled }}
+# Ingress — the app's public front door, enforced by the ingress-nginx
+# controller (installed once at the cluster level, outside this chart). It routes
+# a hostname to the app Service. dev and prod set different hosts in their
+# overlays so both releases can be reached side by side.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "url-shortener.fullname" . }}
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          # Everything under "/" goes to the app: UI at /, API under /api, short
+          # links at /{code} — all one Service.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "url-shortener.fullname" . }}
+                port:
+                  number: 80
+{{- end }}

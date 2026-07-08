@@ -1,0 +1,60 @@
+# values.yaml — the chart's default configuration.
+#
+# Everything that used to be hardcoded in the raw k8s/ manifests now lives here
+# as a value the templates read via {{ .Values.* }}. These are the sane defaults;
+# values-dev.yaml and values-prod.yaml override just the fields that differ per
+# environment, and `helm install -f <overlay>` layers them on top.
+
+# Override the base name for a release's objects (normally "<release>-url-shortener").
+fullnameOverride: ""
+
+image:
+  repository: url-shortener
+  tag: dev
+  # IfNotPresent so the cluster uses the image `kind load` already placed on the
+  # nodes instead of trying to pull from a registry (there isn't one until the
+  # CI phase).
+  pullPolicy: IfNotPresent
+
+app:
+  # How many interchangeable app pods to run. The app is stateless, so this is
+  # a free dial — dev runs 1, prod runs more.
+  replicas: 2
+  # CPU/memory requests + limits. Empty by default (dev); prod sets real values,
+  # which Phase 6's HorizontalPodAutoscaler will also depend on.
+  resources: {}
+  # Health checks hit /healthz (deliberately DB-free so a DB blip doesn't restart
+  # the app). Timings match the raw manifests.
+  readinessProbe:
+    initialDelaySeconds: 3
+    periodSeconds: 5
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  # Size of the PersistentVolume the StatefulSet claims for the database.
+  storage: 1Gi
+  resources: {}
+
+# Non-secret connection settings (host is computed from the release name in the
+# template). These populate the ConfigMap that both Postgres and the app read.
+config:
+  postgresDb: urlshortener
+  postgresUser: appuser
+  postgresPort: "5432"
+
+# The one sensitive value. Plaintext here is fine ONLY because this is a
+# throwaway local-dev password; the stretch phase moves it to sealed-secrets so
+# nothing sensitive sits in git. Never put a real password here.
+secret:
+  postgresPassword: localdevpw
+
+ingress:
+  enabled: true
+  className: nginx
+  # localtest.me resolves to 127.0.0.1, so this works with no /etc/hosts edit.
+  # dev and prod use different subdomains so both can run side by side.
+  host: urlshortener.localtest.me

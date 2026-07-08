@@ -1,0 +1,21 @@
+{{ .Chart.Name }} ({{ .Release.Name }}) is installed in namespace "{{ .Release.Namespace }}".
+
+  Release:   {{ .Release.Name }}
+  Chart:     {{ .Chart.Name }}-{{ .Chart.Version }} (app {{ .Chart.AppVersion }})
+  Replicas:  {{ .Values.app.replicas }} app pod(s)
+
+Watch it come up:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "url-shortener.fullname" . }}
+
+{{- if .Values.ingress.enabled }}
+
+Reach it (localtest.me resolves to 127.0.0.1, no /etc/hosts edit needed):
+  http://{{ .Values.ingress.host }}
+
+Seed demo links:
+  BASE_URL=http://{{ .Values.ingress.host }} python3 scripts/seed_demo.py
+{{- else }}
+
+Ingress is disabled; port-forward to reach it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "url-shortener.fullname" . }} 8000:80
+{{- end }}

@@ -51,14 +51,21 @@ survive (proves the DB is really separate state on the PVC).
 **Demo:** `make seed`, then hit `http://urlshortener.localtest.me` in a browser —
 UI, API, and short-link redirects all work with no port-forward.
 
-## Phase 3 — Helm chart
+## Phase 3 — Helm chart ✅
 
-- Convert the raw manifests into a chart under `charts/url-shortener` with a
+- Converted the raw manifests into a chart under `charts/url-shortener` with a
   `values.yaml`, plus `values-dev.yaml` / `values-prod.yaml` overlays (different
-  replica counts / resource sizes).
+  replica counts / resource sizes / hostnames). A `_helpers.tpl` scopes every
+  object's name to the release, so the two installs never collide.
+- The Makefile deploy path switched from raw `kubectl apply -f k8s/` to
+  `helm upgrade --install` of two releases; the raw manifests stay in `k8s/` as
+  the reference the chart was derived from.
 
-**Demo:** `helm install` the same chart into a `dev` and a `prod` namespace with
-different values side by side.
+**Demo:** `make up` installs the **same chart** as a lean `dev` (1 replica,
+`dev.urlshortener.localtest.me`) and a bigger `prod` (3 replicas + resource
+requests/limits, `urlshortener.localtest.me`) side by side. `helm list -A` shows
+both; each has its own isolated Postgres and serves redirects/stats through its
+own ingress host.
 
 ## Phase 4 — GitOps with Argo CD
 

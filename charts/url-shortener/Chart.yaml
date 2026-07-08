@@ -1,0 +1,18 @@
+# Chart.yaml — the chart's identity card.
+#
+# A Helm *chart* is the whole app packaged as one versioned, reviewable unit:
+# templated Kubernetes manifests + their default values. This file names it and
+# carries two independent version numbers, which is a Helm convention worth
+# understanding:
+#
+#   version     — the chart's own version (bump when the templates/values change).
+#   appVersion  — the version of the app the chart deploys (the container image).
+#
+# They move independently: you can ship a chart fix (v0.1.0 -> v0.1.1) without
+# the app changing, or a new app image without touching the templates.
+apiVersion: v2
+name: url-shortener
+description: A FastAPI + Postgres URL shortener, packaged for Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "dev"

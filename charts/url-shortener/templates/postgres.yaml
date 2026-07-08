@@ -1,0 +1,98 @@
+{{- if .Values.postgres.enabled }}
+# Postgres — the app's database, run as a StatefulSet.
+#
+# A StatefulSet (not a Deployment) because a database owns data on disk that must
+# survive a pod restart: it gives the pod a stable identity and its own
+# persistent volume (volumeClaimTemplate). Delete the pod and Kubernetes
+# recreates it re-attached to the same disk. The headless Service (clusterIP:
+# None) publishes that pod's own address so the app can reach it by a stable DNS
+# name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "url-shortener.postgres.fullname" . }}
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  clusterIP: None
+  selector:
+    {{- include "url-shortener.postgres.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "url-shortener.postgres.fullname" . }}
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "url-shortener.postgres.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "url-shortener.postgres.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "url-shortener.postgres.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - containerPort: 5432
+              name: postgres
+          # Postgres reads these on first start to create the user, password, and
+          # database. Non-secret parts come from the ConfigMap; the password from
+          # the Secret.
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "url-shortener.fullname" . }}-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "url-shortener.fullname" . }}-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "url-shortener.fullname" . }}-secret
+                  key: POSTGRES_PASSWORD
+            # Store data in a subdirectory of the mounted volume: the mount root
+            # can hold a lost+found entry that upsets initdb.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.config.postgresUser | quote }}, "-d", {{ .Values.config.postgresDb | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.config.postgresUser | quote }}, "-d", {{ .Values.config.postgresDb | quote }}]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          {{- with .Values.postgres.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+{{- end }}

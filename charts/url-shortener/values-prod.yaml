@@ -1,0 +1,30 @@
+# values-prod.yaml — the "prod" environment overlay.
+#
+# Layered on top of values.yaml with:
+#   helm install prod charts/url-shortener -n url-shortener-prod -f values-prod.yaml
+# Prod runs more replicas for availability and sets real CPU/memory requests +
+# limits. The requests matter beyond prod hygiene: Phase 6's HorizontalPodAutoscaler
+# scales on CPU *as a percentage of the request*, so a request must exist for it
+# to have a baseline to measure against.
+app:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+postgres:
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ingress:
+  host: urlshortener.localtest.me
