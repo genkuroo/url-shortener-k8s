@@ -38,12 +38,18 @@ costs $0 and can be left running for a demo. A stretch phase makes it EKS-ready.
 `kubectl delete pod` both the app pod and `postgres-0` — the links + click counts
 survive (proves the DB is really separate state on the PVC).
 
-## Phase 2 — Ingress
+## Phase 2 — Ingress ✅
 
-- Install **ingress-nginx**; add an Ingress routing `urlshortener.localtest.me`
+- Installed **ingress-nginx** (kind provider, pinned to v1.15.1, vendored in
+  `k8s/ingress-nginx/` so the version is reviewable and reproducible). One local
+  edit: re-added the `ingress-ready=true` nodeSelector the v1.15.1 manifest
+  dropped, so the controller is pinned to the control-plane node — the only node
+  whose host ports 80/443 are forwarded to the laptop.
+- Added an **Ingress** (`k8s/40-ingress.yaml`) routing `urlshortener.localtest.me`
   (a domain that resolves to 127.0.0.1) to the app Service.
 
-**Demo:** hit the app through the ingress host in a browser, no port-forward.
+**Demo:** `make seed`, then hit `http://urlshortener.localtest.me` in a browser —
+UI, API, and short-link redirects all work with no port-forward.
 
 ## Phase 3 — Helm chart
 

@@ -1,0 +1,36 @@
+# Ingress — the app's public front door.
+#
+# Phase 1 could only be reached with `kubectl port-forward` (a manual tunnel).
+# An Ingress is a routing rule: "requests for host urlshortener.localtest.me go
+# to the url-shortener Service on port 80." The rule is enforced by the
+# ingress-nginx controller (installed from k8s/ingress-nginx/), which is the
+# single reverse proxy listening on ports 80/443 at the edge of the cluster —
+# the in-cluster equivalent of the AWS load balancer from the ECS project.
+#
+# Why the hostname works with no /etc/hosts edit: localtest.me is a real public
+# domain whose DNS resolves to 127.0.0.1. So urlshortener.localtest.me hits this
+# laptop, the kind control-plane node forwards host port 80 into the cluster
+# (see kind-config.yaml), the controller receives it, matches the rule below,
+# and proxies to the app Service.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: url-shortener
+  namespace: url-shortener
+spec:
+  # Which controller handles this Ingress. `nginx` is the IngressClass created
+  # when we installed ingress-nginx.
+  ingressClassName: nginx
+  rules:
+    - host: urlshortener.localtest.me
+      http:
+        paths:
+          # Send every path ("/" prefix) to the app. The app serves its UI at
+          # /, the API under /api, and short links at /{code} — all one Service.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: url-shortener
+                port:
+                  number: 80

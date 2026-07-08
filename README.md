@@ -26,18 +26,21 @@ myself."* Same Docker image — but now I own the scheduler.
 Grafana** · **Horizontal Pod Autoscaler** · **ingress-nginx** · **GitHub Actions →
 GHCR**. App inside the container: **Python + FastAPI** talking to **Postgres**.
 
-## Run it (Phase 1 — on a local Kubernetes cluster)
+## Run it (on a local Kubernetes cluster)
 
 Needs Docker, [`kind`](https://kind.sigs.k8s.io/), and `kubectl`. The `Makefile`
 wraps the whole workflow (`make help` lists every target):
 
 ```bash
-make up            # create the kind cluster, build+load the image, apply k8s/
-make port-forward  # terminal 1: expose the app on http://localhost:8000
-make seed          # terminal 2: add demo links + clicks
-open http://localhost:8000
+make up            # cluster + image + ingress-nginx + app manifests
+make seed          # add demo links + clicks (through the ingress)
+open http://urlshortener.localtest.me      # use the app — no port-forward
 make down          # delete the whole cluster
 ```
+
+`urlshortener.localtest.me` is a real domain that resolves to `127.0.0.1`, so it
+reaches the in-cluster **ingress-nginx** controller with no `/etc/hosts` edits.
+(`make port-forward` still works as a fallback if you'd rather not use ingress.)
 
 **Prove the state model** — the app is stateless, the database isn't:
 
@@ -48,7 +51,7 @@ kubectl -n url-shortener delete pod postgres-0             # kill the database p
 # the StatefulSet's PersistentVolumeClaim, not in any pod.
 ```
 
-### What's in the cluster (Phase 1)
+### What's in the cluster
 
 - **Namespace** `url-shortener` — everything grouped under one name.
 - **Postgres** as a **StatefulSet** + headless Service + a 1Gi **PVC** — stable
@@ -58,6 +61,9 @@ kubectl -n url-shortener delete pod postgres-0             # kill the database p
   for Postgres before starting.
 - A **ConfigMap** (non-secret settings) + **Secret** (DB password); the app
   assembles `DATABASE_URL` from both at runtime.
+- **ingress-nginx** controller (vendored in `k8s/ingress-nginx/`, pinned to
+  v1.15.1) + an **Ingress** routing `urlshortener.localtest.me` to the app
+  Service — the cluster's public front door.
 
 ### Try it without Kubernetes (Phase 0 smoke test)
 
@@ -70,4 +76,4 @@ docker compose down
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 1 (kind cluster + raw manifests).** Ingress is next.
+**Currently: Phase 2 (ingress-nginx front door).** Helm packaging is next.

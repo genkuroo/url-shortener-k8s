@@ -16,8 +16,9 @@
 CLUSTER  := url-shortener
 IMAGE    := url-shortener:dev
 NS       := url-shortener
+HOST     := urlshortener.localtest.me
 
-.PHONY: help cluster-up cluster-down build load deploy up down status logs port-forward seed restart-app
+.PHONY: help cluster-up cluster-down build load ingress-install deploy up down status logs port-forward seed restart-app
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -37,13 +38,19 @@ build: ## Build the app container image
 load: build ## Load the image into the kind cluster (no registry needed)
 	kind load docker-image $(IMAGE) --name $(CLUSTER)
 
-deploy: ## Apply all manifests, then wait for the app to be ready
+ingress-install: ## Install the ingress-nginx controller (vendored, pinned)
+	kubectl apply -f k8s/ingress-nginx/controller.yaml
+	kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s
+
+deploy: ## Apply app manifests (k8s/ is non-recursive, so ingress-nginx/ is skipped)
 	kubectl apply -f k8s/
 	kubectl -n $(NS) rollout status statefulset/postgres --timeout=120s
 	kubectl -n $(NS) rollout status deployment/url-shortener --timeout=120s
 
-up: cluster-up load deploy ## Full stack from scratch: cluster + image + manifests
-	@echo "\nAll up. Next:  make port-forward   (then, elsewhere)  make seed"
+# ingress-install runs before deploy: the Ingress in k8s/ is validated by the
+# controller's admission webhook, which must be running first.
+up: cluster-up load ingress-install deploy ## Full stack from scratch
+	@echo "\nAll up. App: http://$(HOST)   (then)  make seed"
 
 down: cluster-down ## Tear everything down (deletes the whole cluster)
 
@@ -58,9 +65,9 @@ status: ## Show what's running in the namespace
 logs: ## Tail the app logs (structured JSON access lines)
 	kubectl -n $(NS) logs -l app=url-shortener --tail=50 -f
 
-port-forward: ## Expose the app Service on http://localhost:8000
+port-forward: ## Fallback access without ingress: app on http://localhost:8000
 	@echo "App at http://localhost:8000  (Ctrl-C to stop)"
 	kubectl -n $(NS) port-forward svc/url-shortener 8000:80
 
-seed: ## Create demo links (needs `make port-forward` running)
-	python3 scripts/seed_demo.py http://localhost:8000
+seed: ## Create demo links through the ingress host
+	BASE_URL=http://$(HOST) python3 scripts/seed_demo.py

@@ -52,18 +52,24 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 
 ## Current state (as of 2026-07-08)
 
-**Phase 1 complete — kind cluster + raw manifests.** A `kind-config.yaml`
-(1 control-plane + 2 workers) and a `Makefile` that wraps create/destroy plus
-build → `kind load` → `kubectl apply`. Raw YAML under `k8s/`: Namespace, Postgres
-StatefulSet + headless Service + 1Gi PVC, ConfigMap + Secret, the app
-Deployment (2 replicas) + ClusterIP Service, liveness/readiness probes on
-`/healthz`, and an init container that waits for Postgres. Verified: deleting the
-app pod and `postgres-0` leaves links + click counts intact (data lives on the
-PVC). Tooling: `kind`/`kubectl` installed via Homebrew; `helm` not needed until
-Phase 3.
+**Phase 2 complete — ingress-nginx front door.** Phase 1 built the cluster and
+raw manifests (Namespace, Postgres StatefulSet + headless Service + 1Gi PVC,
+ConfigMap + Secret, app Deployment + ClusterIP Service, probes, init container).
+Phase 2 added ingress-nginx (kind provider, v1.15.1, vendored in
+`k8s/ingress-nginx/controller.yaml`) plus `k8s/40-ingress.yaml` routing
+`urlshortener.localtest.me` → the app Service. One local edit to the vendored
+manifest: re-added the `ingress-ready=true` nodeSelector (dropped upstream in
+v1.15.1) so the controller pins to the control-plane node, the only one whose
+host ports 80/443 are forwarded (see `kind-config.yaml`). Verified end-to-end
+through the ingress host: UI, API, and short-link 307 redirects. Tooling:
+`kind`/`kubectl` via Homebrew; `helm` not needed until Phase 3.
 
-Next: **Phase 2** — install ingress-nginx and route `urlshortener.localtest.me`
-to the app Service (host ports 80/443 are already forwarded in `kind-config.yaml`).
+`make up` now does: cluster → build/load image → ingress-install → deploy.
+Note `kubectl apply -f k8s/` is non-recursive, so it applies `00–40` but skips
+the vendored `ingress-nginx/` subdir (installed separately by `make ingress-install`).
+
+Next: **Phase 3** — convert the raw manifests into a Helm chart
+(`charts/url-shortener`) with `values.yaml` + dev/prod overlays.
 
 ## Conventions
 
