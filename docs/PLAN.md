@@ -21,17 +21,22 @@ costs $0 and can be left running for a demo. A stretch phase makes it EKS-ready.
 
 **Demo:** `docker compose up --build`, open http://127.0.0.1:8000, shorten a URL.
 
-## Phase 1 — kind cluster + raw manifests
+## Phase 1 — kind cluster + raw manifests ✅
 
-- A `kind-config.yaml` and a `Makefile`/scripts to create/destroy the cluster.
+- A `kind-config.yaml` (1 control-plane + 2 workers) and a `Makefile` that
+  wraps create/destroy plus build → `kind load` → `kubectl apply`.
 - Raw YAML under `k8s/`: Namespace, Postgres **StatefulSet** + headless Service +
-  PVC, a Secret (DB URL) and ConfigMap, the app **Deployment** + Service, with
-  **liveness/readiness probes** on `/healthz`.
+  PVC, a Secret (DB password) and ConfigMap, the app **Deployment** + Service,
+  with **liveness/readiness probes** on `/healthz`. An init container waits for
+  Postgres so the app starts cleanly instead of crash-looping.
+- The app assembles `DATABASE_URL` at runtime from the ConfigMap + Secret via
+  `$(VAR)` env expansion, so the password lives only in the Secret.
 - Build the image and `kind load docker-image` it into the cluster (no registry
   needed yet).
 
-**Demo:** `kubectl port-forward`, shorten a URL, then `kubectl delete pod` the
-app — links + click counts survive (proves the DB is really separate state).
+**Demo:** `make up`, `make port-forward`, `make seed`, shorten a URL, then
+`kubectl delete pod` both the app pod and `postgres-0` — the links + click counts
+survive (proves the DB is really separate state on the PVC).
 
 ## Phase 2 — Ingress
 

@@ -50,15 +50,20 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-07-03)
+## Current state (as of 2026-07-08)
 
-**Phase 0 complete — scaffold + containerized app.** Repo skeleton, docs, the
-FastAPI app (adapted to read `DATABASE_URL` only), Dockerfile, and a
-`docker-compose.yml` smoke test. No Kubernetes manifests yet — those start in
-Phase 1. Not yet a git repo / not yet on GitHub.
+**Phase 1 complete — kind cluster + raw manifests.** A `kind-config.yaml`
+(1 control-plane + 2 workers) and a `Makefile` that wraps create/destroy plus
+build → `kind load` → `kubectl apply`. Raw YAML under `k8s/`: Namespace, Postgres
+StatefulSet + headless Service + 1Gi PVC, ConfigMap + Secret, the app
+Deployment (2 replicas) + ClusterIP Service, liveness/readiness probes on
+`/healthz`, and an init container that waits for Postgres. Verified: deleting the
+app pod and `postgres-0` leaves links + click counts intact (data lives on the
+PVC). Tooling: `kind`/`kubectl` installed via Homebrew; `helm` not needed until
+Phase 3.
 
-Next: **Phase 1** — a kind cluster + raw manifests (Namespace, Postgres
-StatefulSet + PVC, app Deployment + Service, Secret/ConfigMap, probes).
+Next: **Phase 2** — install ingress-nginx and route `urlshortener.localtest.me`
+to the app Service (host ports 80/443 are already forwarded in `kind-config.yaml`).
 
 ## Conventions
 

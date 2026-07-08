@@ -1,0 +1,138 @@
+# The app — the FastAPI URL shortener, run as a Deployment.
+#
+# A Deployment (not a StatefulSet) because the app is *stateless*: every replica
+# is interchangeable and holds no data of its own — all state lives in Postgres.
+# That's what lets Kubernetes freely create, kill, and reschedule these pods,
+# and what later phases lean on for rolling updates and autoscaling.
+#
+# Two replicas so the "delete a pod" demo is honest: kill one and the Service
+# keeps serving from the other while Kubernetes replaces it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-shortener
+  namespace: url-shortener
+  labels:
+    app: url-shortener
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: url-shortener
+  template:
+    metadata:
+      labels:
+        app: url-shortener
+    spec:
+      # The app connects to Postgres at startup to create its tables. If it
+      # boots before Postgres is accepting connections it crashes, and
+      # Kubernetes restarts it until Postgres is up — self-healing, but noisy
+      # (a few CrashLoopBackOff restarts). This init container blocks the app
+      # container from starting until Postgres answers, so startup is clean.
+      # An init container must run to completion before the main container(s)
+      # start.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER"; do
+                echo "waiting for postgres at $POSTGRES_HOST:$POSTGRES_PORT..."
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_HOST
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_PORT
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_USER
+      containers:
+        - name: app
+          # Built locally and loaded into kind (see the Makefile); no registry
+          # yet. imagePullPolicy: IfNotPresent so Kubernetes uses the image kind
+          # already has instead of trying to pull it from a registry.
+          image: url-shortener:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          # Assemble DATABASE_URL from the ConfigMap + Secret at runtime. The
+          # $(VAR) syntax expands env vars defined earlier in this same list, so
+          # the password never appears here in the clear — only a reference to
+          # the Secret does.
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_HOST
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_PORT
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_DB
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+          # Readiness: is this pod ready to receive traffic? The Service only
+          # routes to pods whose readiness probe passes, so a starting or
+          # unhealthy replica is kept out of rotation.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          # Liveness: is the process still healthy? If this fails repeatedly,
+          # Kubernetes restarts the container. /healthz is deliberately DB-free
+          # so a brief database blip doesn't cause needless restarts.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+# The Service is the app's stable in-cluster address. Pods come and go with their
+# own IPs; this ClusterIP stays put and load-balances across whichever app pods
+# are currently Ready. In Phase 1 we reach it with `kubectl port-forward`; Phase
+# 2 puts an Ingress in front of it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shortener
+  namespace: url-shortener
+  labels:
+    app: url-shortener
+spec:
+  selector:
+    app: url-shortener
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

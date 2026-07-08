@@ -1,0 +1,10 @@
+# A Namespace is a folder for Kubernetes objects: it groups everything for this
+# app under one name so it's easy to see, manage, and delete as a unit
+# (`kubectl get all -n url-shortener`). It also gives the pods a private DNS
+# suffix — the app reaches Postgres at just `postgres` because both live here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: url-shortener
+  labels:
+    app.kubernetes.io/part-of: url-shortener

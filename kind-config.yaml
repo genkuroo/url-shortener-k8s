@@ -1,0 +1,39 @@
+# kind-config.yaml — the recipe for the local Kubernetes cluster.
+#
+# kind ("Kubernetes IN Docker") runs a whole cluster as Docker containers on this
+# laptop. Each `node` below becomes one container. This gives a real, multi-node
+# Kubernetes API to develop against for $0 — no cloud account, nothing to tear
+# down between sessions.
+#
+#   kind create cluster --name url-shortener --config kind-config.yaml
+#
+# One control-plane node + two workers. A single node would work for this app,
+# but two workers make the scheduler's job real: Deployment replicas can land on
+# different nodes, which is closer to how a production cluster behaves and lets
+# later phases (autoscaling, rolling updates) actually spread pods around.
+#
+# The extraPortMappings on the control plane forward host ports 80/443 into the
+# cluster. They aren't used in Phase 1 (we reach the app with `kubectl
+# port-forward`), but Phase 2's ingress-nginx needs them, so they're wired up now
+# to avoid recreating the cluster later.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      # Label the control-plane node so ingress-nginx (Phase 2) can pin its
+      # controller here and match the host-port forwards below.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+  - role: worker
+  - role: worker

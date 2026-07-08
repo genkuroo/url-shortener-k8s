@@ -1,0 +1,36 @@
+# Config for both Postgres and the app, split by sensitivity:
+#
+#   ConfigMap  — non-secret settings (host, port, database name, username).
+#   Secret     — the one sensitive value (the database password).
+#
+# Both Postgres (to initialise itself) and the app (to build its connection
+# string) read from these. Splitting them this way is the point of the exercise:
+# the password lives in exactly one place, and the app assembles DATABASE_URL
+# from the pieces at runtime (see 30-app.yaml) instead of anyone hard-coding a
+# full connection string.
+#
+# NOTE: this password is a throwaway value for a local kind cluster, committed
+# only so the demo is reproducible with one `kubectl apply`. A Kubernetes Secret
+# is base64-encoded, NOT encrypted — never commit a real one. The stretch phase
+# swaps this for sealed-secrets/external-secrets so nothing sensitive sits in git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: url-shortener
+data:
+  POSTGRES_HOST: postgres      # the headless Service name in 20-postgres.yaml
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: urlshortener
+  POSTGRES_USER: appuser
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: url-shortener
+type: Opaque
+stringData:
+  # stringData lets us write the value in plain text; Kubernetes base64-encodes
+  # it on the way in. Local-dev password only.
+  POSTGRES_PASSWORD: localdevpw

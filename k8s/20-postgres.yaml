@@ -1,0 +1,102 @@
+# Postgres — the app's database, run inside the cluster as a StatefulSet.
+#
+# Why a StatefulSet and not a Deployment (which the app uses)? A database is
+# *stateful*: it owns data on disk that must survive a pod restart. A StatefulSet
+# gives its pod a stable identity (`postgres-0`) and, crucially, its own
+# persistent volume via the volumeClaimTemplate below. Delete the pod and
+# Kubernetes recreates `postgres-0` re-attached to the *same* disk — the data is
+# still there. That's exactly the property the Phase 1 demo proves.
+#
+# The headless Service (clusterIP: None) gives the pod stable DNS. Instead of
+# load-balancing across pods, it publishes the pod's own address so the app can
+# reach `postgres` (or `postgres-0.postgres`) reliably.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: url-shortener
+  labels:
+    app: postgres
+spec:
+  clusterIP: None          # headless: DNS resolves straight to the pod
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: url-shortener
+spec:
+  serviceName: postgres    # ties the StatefulSet to the headless Service above
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          # Postgres reads these standard env vars on first start to create the
+          # user, password, and database. Non-secret parts come from the
+          # ConfigMap; the password comes from the Secret.
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            # Point Postgres at a subdirectory of the mounted volume. The mount
+            # root can contain a lost+found entry that upsets initdb; a subdir
+            # sidesteps that and is the documented pattern for this image.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # Readiness gate: don't send traffic (or let the app start querying)
+          # until Postgres actually answers. `pg_isready` is Postgres's own
+          # "are you accepting connections?" check.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "appuser", "-d", "urlshortener"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Liveness gate: if Postgres wedges and stops answering, restart it.
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "appuser", "-d", "urlshortener"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+  # The persistent disk. Kubernetes provisions a PersistentVolumeClaim named
+  # `data-postgres-0` from this template and binds it to the pod. kind ships a
+  # default StorageClass backed by local disk, so this "just works" locally.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

@@ -26,16 +26,48 @@ myself."* Same Docker image — but now I own the scheduler.
 Grafana** · **Horizontal Pod Autoscaler** · **ingress-nginx** · **GitHub Actions →
 GHCR**. App inside the container: **Python + FastAPI** talking to **Postgres**.
 
-## Try it locally (Phase 0 — no Kubernetes needed yet)
+## Run it (Phase 1 — on a local Kubernetes cluster)
+
+Needs Docker, [`kind`](https://kind.sigs.k8s.io/), and `kubectl`. The `Makefile`
+wraps the whole workflow (`make help` lists every target):
+
+```bash
+make up            # create the kind cluster, build+load the image, apply k8s/
+make port-forward  # terminal 1: expose the app on http://localhost:8000
+make seed          # terminal 2: add demo links + clicks
+open http://localhost:8000
+make down          # delete the whole cluster
+```
+
+**Prove the state model** — the app is stateless, the database isn't:
+
+```bash
+kubectl -n url-shortener delete pod -l app=url-shortener   # kill an app pod
+kubectl -n url-shortener delete pod postgres-0             # kill the database pod
+# ...both come back; the links + click counts are still there. The data lives on
+# the StatefulSet's PersistentVolumeClaim, not in any pod.
+```
+
+### What's in the cluster (Phase 1)
+
+- **Namespace** `url-shortener` — everything grouped under one name.
+- **Postgres** as a **StatefulSet** + headless Service + a 1Gi **PVC** — stable
+  identity and its own disk, so data outlives the pod.
+- The app as a 2-replica **Deployment** + ClusterIP **Service**, with
+  **liveness/readiness probes** on `/healthz` and an init container that waits
+  for Postgres before starting.
+- A **ConfigMap** (non-secret settings) + **Secret** (DB password); the app
+  assembles `DATABASE_URL` from both at runtime.
+
+### Try it without Kubernetes (Phase 0 smoke test)
 
 ```bash
 docker compose up --build      # builds the image, starts app + Postgres
-open http://127.0.0.1:8000     # shorten a URL in the browser
-python scripts/seed_demo.py http://localhost:8000   # add demo links + clicks
+open http://127.0.0.1:8000
 docker compose down
 ```
 
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 0 (scaffold + containerized app).** Kubernetes phases next.
+**Currently: Phase 1 (kind cluster + raw manifests).** Ingress is next.
