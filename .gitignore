@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local Kubernetes / tooling
+kubeconfig
+*.kubeconfig
+.env
+
+# OS
+.DS_Store

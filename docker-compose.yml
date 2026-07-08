@@ -1,0 +1,41 @@
+# docker-compose.yml — run the app locally, one command, no Kubernetes.
+#
+#   docker compose up --build     # start it (first run builds the app image)
+#   open http://127.0.0.1:8000    # use it in a browser
+#   docker compose down           # stop and remove everything
+#
+# This is the Phase 0 smoke test: it proves the container image builds and the
+# app runs against a Postgres before any Kubernetes is involved. The "app"
+# service is the exact image kind will run later; the "db" service is a local
+# Postgres standing in for the in-cluster Postgres.
+#
+# Data is intentionally NOT persisted to a volume: each `up` is a clean slate.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: localpw
+      POSTGRES_DB: urlshortener
+    # Compose waits for this check to pass before starting the app (see the
+    # app's depends_on below), so the app never races the database on startup.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d urlshortener"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  app:
+    build: ./app
+    environment:
+      # The same env var Kubernetes will inject from a Secret. When it's set the
+      # app connects straight to this Postgres.
+      DATABASE_URL: postgresql://appuser:localpw@db:5432/urlshortener
+    ports:
+      # Bound to 127.0.0.1 (loopback) on purpose: reachable from your browser,
+      # not from your network or the internet.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
