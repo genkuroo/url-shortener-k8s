@@ -1,0 +1,33 @@
+# dev.yaml — the Argo Application for the lean "dev" environment.
+#
+# Created by the app-of-apps (gitops/root-app.yaml), not applied by hand. It tells
+# Argo to render the SAME chart as prod but with the dev overlay (1 replica, small
+# PVC, dev.urlshortener.localtest.me) and keep url-shortener-dev reconciled to it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: url-shortener
+
+  source:
+    repoURL: https://github.com/genkuroo/url-shortener-k8s.git
+    targetRevision: main
+    path: charts/url-shortener
+    helm:
+      valueFiles:
+        - values-dev.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: url-shortener-dev
+
+  syncPolicy:
+    automated:
+      prune: true      # remove objects deleted from the chart
+      selfHeal: true   # revert hand-edits back to git (the reconcile demo)
+    syncOptions:
+      - CreateNamespace=true   # make url-shortener-dev if it doesn't exist

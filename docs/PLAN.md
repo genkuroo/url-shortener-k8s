@@ -67,13 +67,24 @@ requests/limits, `urlshortener.localtest.me`) side by side. `helm list -A` shows
 both; each has its own isolated Postgres and serves redirects/stats through its
 own ingress host.
 
-## Phase 4 — GitOps with Argo CD
+## Phase 4 — GitOps with Argo CD ✅
 
-- Install **Argo CD**; define an `Application` that points at the Helm chart in
-  this git repo. The cluster now pulls its desired state from git.
+- Installed **Argo CD** (pinned v3.4.5, applied from the upstream URL by
+  `make argocd-install`) and defined an **app-of-apps** under `gitops/`: an
+  `AppProject` scopes the repo + the three namespaces, a root `Application`
+  reconciles `gitops/apps/`, and the two child `Application`s point at the same
+  `charts/url-shortener` chart with the `values-dev` / `values-prod` overlays. The
+  cluster now **pulls** its desired state from git (auto-sync, prune, self-heal).
+- The Makefile deploy path moved off direct `helm install`: `make up` now installs
+  Argo CD and bootstraps the app-of-apps, and Argo deploys both releases. The
+  `helm-dev`/`helm-prod` targets stay as a labeled manual/reference path.
+- One-time handoff on the existing cluster: `helm uninstall`ed the Phase-3 releases
+  (Postgres StatefulSet PVCs are retained, so data survived) and let Argo re-adopt
+  the objects as their sole owner.
 
-**Demo:** change replica count in git, push, watch Argo CD reconcile the cluster
-to match — no `kubectl apply` by hand.
+**Demo:** bump a replica count in `values-dev.yaml`, push, and watch Argo CD
+reconcile the cluster to match with no `kubectl apply`; or hand-edit a live
+Deployment and watch self-heal revert it.
 
 ## Phase 5 — Observability
 

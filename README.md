@@ -33,18 +33,20 @@ Needs Docker, [`kind`](https://kind.sigs.k8s.io/), `kubectl`, and
 (`make help` lists every target):
 
 ```bash
-make up            # cluster + image + ingress-nginx, then helm installs dev + prod
+make up            # cluster + image + ingress-nginx + Argo CD, which deploys dev + prod
+kubectl -n argocd get applications   # watch dev + prod go Synced / Healthy
 make seed          # add demo links + clicks to prod (make seed-dev for dev)
 open http://urlshortener.localtest.me          # prod  — no port-forward
 open http://dev.urlshortener.localtest.me      # dev   — the same chart, 1 replica
 make down          # delete the whole cluster
 ```
 
-The app is packaged as a **Helm chart** (`charts/url-shortener`) and installed as
-**two releases from the same chart**: a lean `dev` (1 replica, smaller volume) in
+The app is packaged as a **Helm chart** (`charts/url-shortener`) deployed as **two
+releases from the same chart**: a lean `dev` (1 replica, smaller volume) in
 `url-shortener-dev` and a bigger `prod` (3 replicas, resource requests/limits) in
 `url-shortener-prod`. Only the values differ (`values-dev.yaml` /
-`values-prod.yaml`); the templates are identical. `helm list -A` shows both.
+`values-prod.yaml`); the templates are identical. Since Phase 4 the chart isn't
+installed by hand — **Argo CD deploys it from git** (see below).
 
 `urlshortener.localtest.me` / `dev.urlshortener.localtest.me` are real domains
 that resolve to `127.0.0.1`, so they reach the in-cluster **ingress-nginx**
@@ -78,6 +80,39 @@ controller (vendored in `k8s/ingress-nginx/`, pinned to v1.15.1). The original
 raw manifests are kept in `k8s/` as the Phase 1/2 reference the chart was
 derived from.
 
+### GitOps: the cluster pulls its state from git (Argo CD)
+
+Nothing above is deployed by hand. **Argo CD** watches this repo and continuously
+reconciles the cluster to match the chart on `main` — the desired state lives in
+git, not in whatever `kubectl`/`helm` commands someone happened to run. `make up`
+installs Argo CD (pinned **v3.4.5**) and applies one bootstrap object; Argo does
+the rest.
+
+The delivery model is **app-of-apps**, under [`gitops/`](gitops/):
+
+- `project.yaml` — an **AppProject** that scopes Argo to *this* repo and *only*
+  the three namespaces it owns (least-privilege for the delivery pipeline).
+- `root-app.yaml` — the **root Application** you bootstrap once. Its contents are
+  simply the other Application files in `gitops/apps/`, so Argo reads that folder
+  from git and creates the child apps itself.
+- `apps/dev.yaml`, `apps/prod.yaml` — one **Application** each, pointing at the
+  same `charts/url-shortener` chart with the dev / prod values. Both are set to
+  **auto-sync, prune, and self-heal**.
+
+```bash
+kubectl -n argocd get applications     # url-shortener-root, dev, prod → Synced/Healthy
+make argocd-ui                         # open the dashboard at https://localhost:8080
+make argocd-password                   # the initial 'admin' password
+```
+
+Two things this buys you, both demoable:
+
+- **Change via git, not kubectl.** Edit a replica count in `values-dev.yaml`, push
+  to `main`, and Argo reconciles the cluster to match — no `kubectl apply`.
+- **Self-heal.** Hand-edit a live object (`kubectl scale deploy/prod-url-shortener
+  --replicas=5`) and Argo reverts it back to what git says. Git is the only source
+  of truth.
+
 ### Try it without Kubernetes (Phase 0 smoke test)
 
 ```bash
@@ -89,5 +124,5 @@ docker compose down
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 3 (Helm chart, dev + prod releases).** GitOps with Argo CD is
-next.
+**Currently: Phase 4 (GitOps with Argo CD — app-of-apps deploying dev + prod).**
+Observability (Prometheus + Grafana) is next.

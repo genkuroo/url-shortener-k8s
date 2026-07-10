@@ -1,0 +1,33 @@
+# prod.yaml — the Argo Application for the "prod" environment.
+#
+# Created by the app-of-apps (gitops/root-app.yaml), not applied by hand. Same
+# chart as dev, prod overlay (3 replicas + CPU/memory requests+limits,
+# urlshortener.localtest.me), reconciled into its own url-shortener-prod namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: url-shortener
+
+  source:
+    repoURL: https://github.com/genkuroo/url-shortener-k8s.git
+    targetRevision: main
+    path: charts/url-shortener
+    helm:
+      valueFiles:
+        - values-prod.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: url-shortener-prod
+
+  syncPolicy:
+    automated:
+      prune: true      # remove objects deleted from the chart
+      selfHeal: true   # revert hand-edits back to git (the reconcile demo)
+    syncOptions:
+      - CreateNamespace=true   # make url-shortener-prod if it doesn't exist

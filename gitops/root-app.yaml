@@ -1,0 +1,37 @@
+# root-app.yaml — the "app of apps".
+#
+# This is the ONE object we apply by hand to bootstrap GitOps (see the Makefile's
+# `argocd-bootstrap`). It is an Argo Application whose "manifests" are simply the
+# other Application files in gitops/apps/ — so applying this once tells Argo to
+# read that directory from git and create the dev + prod Applications itself.
+#
+# From then on the Applications live in git and are reconciled like anything else:
+# add/remove an environment by editing gitops/apps/ and pushing — no kubectl.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: url-shortener-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: url-shortener
+
+  source:
+    repoURL: https://github.com/genkuroo/url-shortener-k8s.git
+    targetRevision: main
+    # A plain directory of Application YAMLs — Argo applies each one.
+    path: gitops/apps
+    directory:
+      recurse: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true      # delete child Apps that are removed from git
+      selfHeal: true   # revert any drift back to what git says
+    syncOptions:
+      - ApplyOutOfSyncOnly=true

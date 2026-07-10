@@ -50,35 +50,43 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-07-08)
+## Current state (as of 2026-07-10)
 
-**Phase 3 complete — Helm chart, dev + prod releases.** The raw manifests were
-converted into a chart under `charts/url-shortener/` (`Chart.yaml`, `values.yaml`,
-`templates/` for config/secret, postgres, app, ingress, plus `_helpers.tpl` and
-`NOTES.txt`). A `_helpers.tpl` scopes every object's name to the release
-(`<release>-url-shortener[-postgres]`) and stamps the standard
-`app.kubernetes.io/*` labels, so two installs never collide. `POSTGRES_HOST` is
-computed from the release name, so each release's app points at its own database.
+**Phase 4 complete — GitOps with Argo CD.** The cluster now **pulls** its desired
+state from git instead of us pushing it. Argo CD (pinned **v3.4.5**, applied from
+the upstream URL by `make argocd-install`) watches this repo and reconciles an
+**app-of-apps** defined under `gitops/`:
 
-Two overlays: `values-dev.yaml` (1 replica, 512Mi PVC,
-`dev.urlshortener.localtest.me`) and `values-prod.yaml` (3 replicas, CPU/mem
-requests+limits, `urlshortener.localtest.me`). Installed as two releases —
-`dev` in ns `url-shortener-dev`, `prod` in ns `url-shortener-prod`. Verified
-side by side end-to-end (redirects/stats/healthz on both hosts, isolated data).
+- `gitops/project.yaml` — an `AppProject` (`url-shortener`) scoping the one source
+  repo and the three destination namespaces (`argocd`, `url-shortener-dev`,
+  `url-shortener-prod`); only `Namespace` is whitelisted cluster-scoped.
+- `gitops/root-app.yaml` — the root `Application` we bootstrap once; its "manifests"
+  are the files in `gitops/apps/`, so Argo creates the child Apps itself.
+- `gitops/apps/{dev,prod}.yaml` — one `Application` each, pointing at the **same**
+  `charts/url-shortener` chart with `values-dev.yaml` / `values-prod.yaml`, into
+  `url-shortener-dev` / `url-shortener-prod`. Both are auto-sync + prune + self-heal.
 
-Migration note: the old Phase 1/2 `url-shortener` namespace (raw-manifest deploy)
-owned the prod host, so the first `prod` install failed on the ingress admission
-webhook (duplicate host+path). Deleted that superseded namespace, re-applied
-prod. The raw `k8s/00–40` manifests stay in the repo as the reference the chart
-was derived from; `k8s/ingress-nginx/` is still installed directly (cluster-level
-infra, not part of the app chart).
+`make up` no longer runs `helm install` directly: it does cluster → build/load
+image → ingress-install → `argocd-install` → `argocd-bootstrap`, and Argo deploys
+both releases from `main`. New targets: `argocd-install`, `argocd-bootstrap`,
+`argocd-password`, `argocd-ui`, `gitops-up`. `helm-dev`/`helm-prod` remain as a
+labeled manual/reference path (running them alongside Argo would create a second
+owner that fights self-heal).
 
-`make up` now does: cluster → build/load image → ingress-install → `helm-dev` +
-`helm-prod` (both via `helm upgrade --install`). New targets: `lint`, `template`,
-`helm-dev`, `helm-prod`, `uninstall`, `seed-dev`. Tooling: `kind`/`kubectl`/`helm`
-via Homebrew (helm v4.2.2).
+Handoff note: the live cluster already had the Phase-3 `dev`/`prod` **Helm**
+releases, so ownership was handed to Argo once — `helm uninstall`ed both (the
+Postgres StatefulSet `volumeClaimTemplates` PVCs and the namespaces are retained,
+so data survived), then bootstrapped Argo to re-adopt the objects as sole owner.
+Because Argo pulls from GitHub `main`, `gitops/` must be pushed before a bootstrap
+takes effect. The image is still `kind load`ed locally (`pullPolicy: IfNotPresent`),
+so no registry is needed until Phase 7.
 
-Next: **Phase 4** — GitOps with Argo CD pointing at `charts/url-shortener`.
+The raw `k8s/00–40` manifests stay in the repo as the Phase 1/2 reference;
+`k8s/ingress-nginx/` is still installed directly (cluster-level infra). Tooling:
+`kind`/`kubectl`/`helm` via Homebrew (helm v4.2.2), Argo CD v3.4.5.
+
+Next: **Phase 5** — Observability (kube-prometheus-stack + a `/metrics` endpoint +
+ServiceMonitor + a Grafana dashboard).
 
 ## Conventions
 

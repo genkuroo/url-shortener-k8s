@@ -5,17 +5,21 @@
 # rebuilt with single words. Nothing is configured by hand-editing live cluster
 # state — the Helm chart in charts/ is the source of truth for the app.
 #
-# Phase 3 switched the app's deploy path from raw `kubectl apply -f k8s/` to a
-# Helm chart installed as two side-by-side releases: a lean `dev` and a bigger
-# `prod`, each in its own namespace. The raw manifests in k8s/ are kept as the
-# Phase 1/2 reference; k8s/ingress-nginx/ is still installed directly (it's
-# cluster-level infra, not part of the app chart).
+# Phase 3 packaged the app as a Helm chart (charts/) installed as two side-by-side
+# releases — a lean `dev` and a bigger `prod`, each in its own namespace. Phase 4
+# then handed the actual deploy to GitOps: Argo CD watches this repo and reconciles
+# the cluster to the chart on `main`, so `up` installs Argo and bootstraps an
+# app-of-apps instead of running `helm install` itself. The raw manifests in k8s/
+# are kept as the Phase 1/2 reference; k8s/ingress-nginx/ is still installed
+# directly (cluster-level infra, not part of the app chart).
 #
 # Typical first run:
-#   make up        # cluster, build+load image, ingress, then helm dev + prod
-#   make seed      # create demo links through the prod host
+#   make up            # cluster, build+load image, ingress, Argo CD, app-of-apps
+#   kubectl -n argocd get applications   # watch dev + prod go Synced/Healthy
+#   make seed && make seed-dev           # demo links through both hosts
 #   open http://urlshortener.localtest.me          (prod)
 #   open http://dev.urlshortener.localtest.me      (dev)
+#   make argocd-ui                       # the Argo CD dashboard
 #
 # Tear it all down with `make down`.
 
@@ -27,8 +31,15 @@ NS_PROD   := url-shortener-prod
 HOST_DEV  := dev.urlshortener.localtest.me
 HOST_PROD := urlshortener.localtest.me
 
+# Argo CD is pinned to a specific release so an install is reproducible. The full
+# install.yaml is ~19k lines, so (unlike the vendored ingress-nginx manifest) we
+# apply it straight from the pinned upstream URL instead of committing it.
+ARGOCD_VERSION := v3.4.5
+ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_VERSION)/manifests/install.yaml
+
 .PHONY: help cluster-up cluster-down build load ingress-install \
         lint template helm-dev helm-prod up down uninstall \
+        argocd-install argocd-bootstrap argocd-password argocd-ui gitops-up \
         status logs port-forward seed seed-dev restart-app
 
 help: ## Show this help
@@ -60,18 +71,51 @@ lint: ## Validate the chart renders for both environments
 template: ## Render the chart to stdout (dry run, no cluster needed)
 	helm template prod $(CHART) -f $(CHART)/values-prod.yaml
 
-helm-dev: ## Install/upgrade the lean dev release into its own namespace
+# helm-dev / helm-prod are the Phase-3 manual deploy path, kept for reference and
+# for `helm template`/debugging. Since Phase 4, Argo CD owns the live releases, so
+# these are NOT part of `up` — running them would create a second owner that fights
+# Argo's self-heal. Use them only against a cluster where Argo isn't managing the app.
+helm-dev: ## (manual/reference — Argo owns the live release) install the lean dev release
 	helm upgrade --install dev $(CHART) -n $(NS_DEV) --create-namespace -f $(CHART)/values-dev.yaml
 	kubectl -n $(NS_DEV) rollout status deployment/dev-url-shortener --timeout=120s
 
-helm-prod: ## Install/upgrade the prod release into its own namespace
+helm-prod: ## (manual/reference — Argo owns the live release) install the prod release
 	helm upgrade --install prod $(CHART) -n $(NS_PROD) --create-namespace -f $(CHART)/values-prod.yaml
 	kubectl -n $(NS_PROD) rollout status deployment/prod-url-shortener --timeout=120s
 
-# ingress-install runs before the releases: the Ingress objects are validated by
-# the controller's admission webhook, which must be running first.
-up: cluster-up load ingress-install helm-dev helm-prod ## Full stack: cluster + dev + prod
-	@echo "\nAll up.  prod: http://$(HOST_PROD)   dev: http://$(HOST_DEV)   (then)  make seed"
+# --- GitOps / Argo CD (Phase 4) ---------------------------------------------
+# The cluster PULLS its desired state from git instead of us pushing it. Argo CD
+# watches this repo and reconciles the app-of-apps (gitops/) to match `main`.
+
+argocd-install: ## Install Argo CD (pinned version) into the argocd namespace
+	kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
+	kubectl apply -n argocd -f $(ARGOCD_MANIFEST)
+	kubectl -n argocd rollout status deployment/argocd-server --timeout=300s
+
+argocd-bootstrap: ## Apply the AppProject + app-of-apps root (Argo then deploys dev + prod)
+	kubectl apply -f gitops/project.yaml
+	kubectl apply -f gitops/root-app.yaml
+	@echo "Bootstrapped. Watch it converge:  kubectl -n argocd get applications -w"
+
+argocd-password: ## Print the initial Argo CD admin password
+	@kubectl -n argocd get secret argocd-initial-admin-secret \
+		-o jsonpath='{.data.password}' | base64 -d && echo
+
+argocd-ui: ## Port-forward the Argo CD UI to https://localhost:8080 (user: admin)
+	@echo "Argo CD UI at https://localhost:8080  (user 'admin', pw: make argocd-password)"
+	kubectl -n argocd port-forward svc/argocd-server 8080:443
+
+gitops-up: argocd-install argocd-bootstrap ## Install Argo CD and bootstrap the app-of-apps
+
+# Phase 4 made Argo CD the app deployer (GitOps): `up` no longer runs helm-dev/
+# helm-prod directly — it installs Argo CD and bootstraps the app-of-apps, and
+# Argo pulls the chart from git and deploys both releases. `load` still builds and
+# `kind load`s the image first (no registry yet), and ingress-install runs before
+# the app so the Ingress objects pass the controller's admission webhook.
+up: cluster-up load ingress-install argocd-install argocd-bootstrap ## Full stack: cluster + Argo CD + dev + prod (GitOps)
+	@echo "\nAll up (GitOps).  prod: http://$(HOST_PROD)   dev: http://$(HOST_DEV)"
+	@echo "Argo:  make argocd-ui  (then https://localhost:8080, user 'admin', pw: make argocd-password)"
+	@echo "Then:  make seed  &&  make seed-dev"
 
 down: cluster-down ## Tear everything down (deletes the whole cluster)
 

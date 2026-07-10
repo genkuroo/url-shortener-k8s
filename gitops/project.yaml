@@ -1,0 +1,45 @@
+# AppProject — the tenancy boundary for everything Argo CD manages in this repo.
+#
+# A project answers "what is Argo allowed to deploy, from where, and to where?".
+# Scoping it (instead of dumping everything in the built-in `default` project)
+# is the same declarative-least-privilege discipline as the rest of the repo:
+#   - it may only pull from THIS git repo, and
+#   - it may only deploy into the three namespaces this project owns.
+# If a manifest ever tried to reach outside those bounds, Argo would refuse to
+# sync it rather than silently do it.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: url-shortener
+  namespace: argocd
+  # Keep the project around even if this file is ever pruned from a parent app.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: URL shortener — dev + prod, delivered by GitOps from this repo.
+
+  # The only source repo allowed. targetRevision/paths are pinned per-Application.
+  sourceRepos:
+    - https://github.com/genkuroo/url-shortener-k8s.git
+
+  # The only places Argo may deploy. `argocd` is where the app-of-apps writes its
+  # child Application objects; the two app namespaces are where the chart lands.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+    - server: https://kubernetes.default.svc
+      namespace: url-shortener-dev
+    - server: https://kubernetes.default.svc
+      namespace: url-shortener-prod
+
+  # The chart is entirely namespaced except for the Namespaces themselves, which
+  # the child apps create via the CreateNamespace sync option — so the only
+  # cluster-scoped kind we allow is Namespace.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  # Within its allowed namespaces the project may manage any resource kind.
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
