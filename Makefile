@@ -89,7 +89,10 @@ helm-prod: ## (manual/reference — Argo owns the live release) install the prod
 
 argocd-install: ## Install Argo CD (pinned version) into the argocd namespace
 	kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
-	kubectl apply -n argocd -f $(ARGOCD_MANIFEST)
+	# --server-side: the ApplicationSet CRD is larger than the 256KB limit on the
+	# last-applied-config annotation that a client-side `kubectl apply` would write,
+	# so a plain apply fails on it. Server-side apply doesn't use that annotation.
+	kubectl apply -n argocd --server-side -f $(ARGOCD_MANIFEST)
 	kubectl -n argocd rollout status deployment/argocd-server --timeout=300s
 
 argocd-bootstrap: ## Apply the AppProject + app-of-apps root (Argo then deploys dev + prod)
