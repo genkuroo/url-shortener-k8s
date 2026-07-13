@@ -24,12 +24,17 @@ spec:
     - https://prometheus-community.github.io/helm-charts
 
   # Platform add-ons land in their own `monitoring` namespace; `argocd` is here so
-  # the app-of-apps can create this project's child Application objects.
+  # the app-of-apps can create this project's child Application objects. kube-system
+  # is allowed because kube-prometheus-stack puts a few small exporter Services there
+  # (kubelet, coredns) to scrape cluster components — a monitoring stack genuinely
+  # needs to reach into kube-system.
   destinations:
     - server: https://kubernetes.default.svc
       namespace: monitoring
     - server: https://kubernetes.default.svc
       namespace: argocd
+    - server: https://kubernetes.default.svc
+      namespace: kube-system
 
   # Monitoring genuinely needs cluster-scoped kinds (CRDs, ClusterRoles, webhooks),
   # so this project — unlike the app one — allows any resource, cluster- or

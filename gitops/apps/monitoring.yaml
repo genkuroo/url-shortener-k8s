@@ -32,6 +32,18 @@ spec:
         # StatefulSet + PVC and keeps the footprint down.
         alertmanager:
           enabled: false
+        # These control-plane components bind to 127.0.0.1 on kind, so Prometheus
+        # (in a pod) can't scrape them — the targets would just show DOWN. Disable
+        # their monitors so the Targets page stays clean. kubelet + coredns still
+        # work and stay enabled.
+        kubeScheduler:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+        kubeProxy:
+          enabled: false
         grafana:
           # Local-demo credentials only (same throwaway spirit as the DB password).
           adminPassword: admin
