@@ -8,8 +8,10 @@ know or care about the orchestrator — that's the whole point of a container.
 
 Observability: a middleware writes one JSON line per request to stdout (method,
 path, status, latency). In Kubernetes those lines are collected by the container
-runtime and visible via `kubectl logs`; Phase 5 also scrapes Prometheus metrics
-from /metrics for dashboards.
+runtime and visible via `kubectl logs`. On top of that, Phase 5 exposes Prometheus
+metrics at /metrics (request count, latency histogram, in-flight, etc.) via
+prometheus-fastapi-instrumentator; a ServiceMonitor tells Prometheus to scrape it,
+and Grafana graphs the result.
 
 Where the database URL comes from:
   - Locally (docker compose): DATABASE_URL is set in docker-compose.yml.
@@ -31,6 +33,7 @@ import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, HttpUrl
 
 app = FastAPI(title="URL Shortener")
@@ -71,6 +74,21 @@ async def log_requests(request: Request, call_next):
         )
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics (observability)
+# ---------------------------------------------------------------------------
+# Expose a /metrics endpoint that Prometheus scrapes. The instrumentator adds
+# standard HTTP metrics — request counts, a latency histogram, in-flight gauge —
+# labelled by method/path/status, which is enough to graph request rate, latency
+# percentiles, and error rate in Grafana.
+#
+# This is wired up HERE, before the greedy `GET /{code}` route defined at the
+# bottom of the file: FastAPI matches routes in definition order, so if /metrics
+# were registered after /{code}, a request to /metrics would be treated as a short
+# code (and 404). Registering it now makes /metrics win.
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 # ---------------------------------------------------------------------------

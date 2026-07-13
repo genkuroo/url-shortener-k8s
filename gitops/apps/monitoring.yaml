@@ -1,0 +1,69 @@
+# monitoring.yaml — the Argo Application that deploys the observability stack.
+#
+# Created by the app-of-apps (gitops/root-app.yaml), like dev/prod, so even the
+# monitoring stack is delivered by GitOps. Instead of pointing at our own chart,
+# its source is the upstream kube-prometheus-stack chart (Prometheus + Grafana +
+# the Prometheus Operator) pulled straight from the prometheus-community Helm repo,
+# pinned by chart version. The lean, local-friendly config lives inline below as
+# `valuesObject` so it's reviewable in git with no extra values file.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Sync BEFORE dev/prod (default wave 0). The operator installs the
+    # ServiceMonitor CRD; the app's ServiceMonitor (wave 0) needs that kind to
+    # already exist, so monitoring must reconcile to Healthy first.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: platform
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 87.15.1
+    helm:
+      # Inline values — kept deliberately lean for a local kind cluster.
+      valuesObject:
+        # Alerting isn't part of this phase; disabling Alertmanager saves a
+        # StatefulSet + PVC and keeps the footprint down.
+        alertmanager:
+          enabled: false
+        grafana:
+          # Local-demo credentials only (same throwaway spirit as the DB password).
+          adminPassword: admin
+          sidecar:
+            dashboards:
+              # Discover dashboard ConfigMaps (label grafana_dashboard=1) in ANY
+              # namespace — the app ships its own dashboard from its namespace.
+              searchNamespace: ALL
+        prometheus:
+          prometheusSpec:
+            retention: 3d
+            # Scrape ALL ServiceMonitors, not just ones labelled with this release
+            # name — so the app's ServiceMonitor is picked up without coupling the
+            # app chart to the stack's release name.
+            serviceMonitorSelectorNilUsesHelmValues: false
+            # Default storage is emptyDir (ephemeral) — fine for a local demo.
+            resources:
+              requests:
+                cpu: 100m
+                memory: 400Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # Required: the Prometheus/Alertmanager CRDs are larger than the 256KB limit
+      # on the last-applied-config annotation a client-side apply writes, so a
+      # normal apply fails on them (same failure we hit installing Argo itself).
+      - ServerSideApply=true

@@ -113,6 +113,30 @@ Two things this buys you, both demoable:
   --replicas=5`) and Argo reverts it back to what git says. Git is the only source
   of truth.
 
+### Observability: metrics → Prometheus → Grafana (Argo-managed)
+
+The app exposes a Prometheus **`/metrics`** endpoint (via
+`prometheus-fastapi-instrumentator`), and the whole monitoring stack —
+**Prometheus + Grafana + the Prometheus Operator** (`kube-prometheus-stack`) — is
+itself deployed by Argo CD, so *even monitoring is GitOps*. The moving parts:
+
+- **`gitops/apps/monitoring.yaml`** — an Argo Application pointing at the pinned
+  upstream `kube-prometheus-stack` chart, under a dedicated `platform` AppProject
+  (the app project stays least-privilege; the platform one gets the broad
+  cluster-scoped perms monitoring needs). It uses **server-side apply** for the
+  huge CRDs and a **sync-wave** so those CRDs land before the app's ServiceMonitor.
+- **`ServiceMonitor`** (in the app chart) — the declarative "scrape *this* service"
+  object the operator turns into Prometheus config. One per environment.
+- **Grafana dashboard** — a ConfigMap the app chart ships; Grafana's sidecar
+  auto-imports it. A `namespace` variable switches it between dev and prod.
+
+```bash
+kubectl -n argocd get applications        # monitoring + dev + prod, all Synced/Healthy
+make prometheus-ui                        # :9090 → Status→Targets: the app endpoints are UP
+make grafana-ui                           # :3000 (admin/admin) → the "URL Shortener" dashboard
+make load-demo                            # drive traffic and watch the panels move
+```
+
 ### Try it without Kubernetes (Phase 0 smoke test)
 
 ```bash
@@ -124,5 +148,6 @@ docker compose down
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 4 (GitOps with Argo CD — app-of-apps deploying dev + prod).**
-Observability (Prometheus + Grafana) is next.
+**Currently: Phase 5 (observability — Prometheus + Grafana, deployed by Argo CD,
+with a per-environment Grafana dashboard).** Autoscaling (HPA + load testing) is
+next.

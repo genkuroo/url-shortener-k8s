@@ -15,11 +15,12 @@
 #
 # Typical first run:
 #   make up            # cluster, build+load image, ingress, Argo CD, app-of-apps
-#   kubectl -n argocd get applications   # watch dev + prod go Synced/Healthy
+#   kubectl -n argocd get applications   # watch dev + prod + monitoring go Synced/Healthy
 #   make seed && make seed-dev           # demo links through both hosts
 #   open http://urlshortener.localtest.me          (prod)
 #   open http://dev.urlshortener.localtest.me      (dev)
 #   make argocd-ui                       # the Argo CD dashboard
+#   make grafana-ui                      # Prometheus/Grafana observability (Phase 5)
 #
 # Tear it all down with `make down`.
 
@@ -40,6 +41,7 @@ ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_V
 .PHONY: help cluster-up cluster-down build load ingress-install \
         lint template helm-dev helm-prod up down uninstall \
         argocd-install argocd-bootstrap argocd-password argocd-ui gitops-up \
+        grafana-ui prometheus-ui load-demo \
         status logs port-forward seed seed-dev restart-app
 
 help: ## Show this help
@@ -95,8 +97,9 @@ argocd-install: ## Install Argo CD (pinned version) into the argocd namespace
 	kubectl apply -n argocd --server-side -f $(ARGOCD_MANIFEST)
 	kubectl -n argocd rollout status deployment/argocd-server --timeout=300s
 
-argocd-bootstrap: ## Apply the AppProject + app-of-apps root (Argo then deploys dev + prod)
+argocd-bootstrap: ## Apply the AppProjects + app-of-apps root (Argo then deploys dev + prod + monitoring)
 	kubectl apply -f gitops/project.yaml
+	kubectl apply -f gitops/project-platform.yaml
 	kubectl apply -f gitops/root-app.yaml
 	@echo "Bootstrapped. Watch it converge:  kubectl -n argocd get applications -w"
 
@@ -110,6 +113,33 @@ argocd-ui: ## Port-forward the Argo CD UI to https://localhost:8080 (user: admin
 
 gitops-up: argocd-install argocd-bootstrap ## Install Argo CD and bootstrap the app-of-apps
 
+# --- Observability / monitoring (Phase 5) -----------------------------------
+# The kube-prometheus-stack (Prometheus + Grafana + operator) is itself an Argo CD
+# Application (gitops/apps/monitoring.yaml), so `make up` already brings it up. The
+# app emits /metrics; a ServiceMonitor tells Prometheus to scrape it; Grafana
+# auto-loads the dashboard the chart ships. These targets just open the UIs and
+# generate demo traffic.
+
+grafana-ui: ## Open the Grafana dashboard at http://localhost:3000 (user: admin, pw: admin)
+	@echo "Grafana at http://localhost:3000  (user 'admin', pw 'admin') — see the 'URL Shortener' dashboard"
+	kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+
+prometheus-ui: ## Open Prometheus at http://localhost:9090 (Status -> Targets to see scrapes)
+	@echo "Prometheus at http://localhost:9090  (Status -> Targets shows the app scrape endpoints)"
+	kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+
+load-demo: ## Generate demo traffic against prod so the Grafana graphs move (Ctrl-C to stop)
+	@echo "Driving traffic at http://$(HOST_PROD) — watch the Grafana dashboard. Ctrl-C to stop."
+	@code=$$(curl -s -X POST http://$(HOST_PROD)/api/links -H 'Content-Type: application/json' \
+		-d '{"url":"https://example.com/load-demo"}' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p'); \
+	echo "created /$$code — following it in a loop"; \
+	while true; do \
+		curl -s -o /dev/null http://$(HOST_PROD)/$$code; \
+		curl -s -o /dev/null http://$(HOST_PROD)/healthz; \
+		curl -s -o /dev/null http://$(HOST_PROD)/does-not-exist; \
+		sleep 0.3; \
+	done
+
 # Phase 4 made Argo CD the app deployer (GitOps): `up` no longer runs helm-dev/
 # helm-prod directly — it installs Argo CD and bootstraps the app-of-apps, and
 # Argo pulls the chart from git and deploys both releases. `load` still builds and
@@ -117,8 +147,9 @@ gitops-up: argocd-install argocd-bootstrap ## Install Argo CD and bootstrap the 
 # the app so the Ingress objects pass the controller's admission webhook.
 up: cluster-up load ingress-install argocd-install argocd-bootstrap ## Full stack: cluster + Argo CD + dev + prod (GitOps)
 	@echo "\nAll up (GitOps).  prod: http://$(HOST_PROD)   dev: http://$(HOST_DEV)"
-	@echo "Argo:  make argocd-ui  (then https://localhost:8080, user 'admin', pw: make argocd-password)"
-	@echo "Then:  make seed  &&  make seed-dev"
+	@echo "Argo:     make argocd-ui   (https://localhost:8080, user 'admin', pw: make argocd-password)"
+	@echo "Grafana:  make grafana-ui  (http://localhost:3000, admin/admin — the monitoring app may take a few min to sync)"
+	@echo "Then:     make seed && make seed-dev && make load-demo"
 
 down: cluster-down ## Tear everything down (deletes the whole cluster)
 

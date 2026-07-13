@@ -28,3 +28,10 @@ postgres:
 
 ingress:
   host: urlshortener.localtest.me
+
+# Prod is scraped AND ships the single shared Grafana dashboard ConfigMap (the
+# dashboard's `namespace` variable switches it between dev and prod).
+serviceMonitor:
+  enabled: true
+dashboard:
+  enabled: true

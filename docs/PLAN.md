@@ -86,14 +86,25 @@ own ingress host.
 reconcile the cluster to match with no `kubectl apply`; or hand-edit a live
 Deployment and watch self-heal revert it.
 
-## Phase 5 — Observability
+## Phase 5 — Observability ✅
 
-- Install **kube-prometheus-stack** (Prometheus + Grafana).
-- Add a Prometheus `/metrics` endpoint to the app (prometheus-fastapi-
-  instrumentator) and a **ServiceMonitor** so Prometheus scrapes it.
-- A Grafana dashboard: request rate, latency, error rate, and link/click counts.
+- Installed **kube-prometheus-stack** (Prometheus + Grafana + operator) the GitOps
+  way — as another Argo CD `Application` (`gitops/apps/monitoring.yaml`, pinned
+  chart 87.15.1) under a dedicated `platform` AppProject. Needs `ServerSideApply`
+  (the CRDs blow the 256KB annotation limit) and a `sync-wave: "-1"` so the
+  operator's CRDs land before the app's ServiceMonitor.
+- Added a Prometheus `/metrics` endpoint to the app (prometheus-fastapi-
+  instrumentator, pinned **7.1.0** for FastAPI 0.115 compatibility), wired in
+  before the greedy `/{code}` route so it isn't swallowed, plus a **ServiceMonitor**
+  in the app chart (enabled per-env) so Prometheus scrapes both releases.
+- A **Grafana dashboard** shipped as a ConfigMap the Grafana sidecar auto-imports
+  (via `.Files.Get` so Grafana's own `{{ }}` legends survive Helm): request rate by
+  status, p50/p95/p99 latency, 5xx error share, and links-created — with a
+  `namespace` variable to switch between dev and prod.
 
-**Demo:** drive traffic with `seed_demo.py`, watch the Grafana dashboard fill in.
+**Demo:** `make load-demo` drives traffic at prod; `make grafana-ui` → the
+URL-Shortener dashboard fills in. `make prometheus-ui` → Status→Targets shows both
+app scrape endpoints UP.
 
 ## Phase 6 — Autoscaling & resilience
 

@@ -13,3 +13,8 @@ postgres:
 
 ingress:
   host: dev.urlshortener.localtest.me
+
+# Scrape dev too, so the dashboard's namespace switcher has a dev option. The
+# dashboard ConfigMap itself is shipped by prod only (see values-prod.yaml).
+serviceMonitor:
+  enabled: true

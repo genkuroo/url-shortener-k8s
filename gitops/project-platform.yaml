@@ -1,0 +1,42 @@
+# AppProject "platform" — tenancy boundary for cluster platform add-ons.
+#
+# The `url-shortener` project (project.yaml) is deliberately tight: it may only
+# deploy namespaced resources into the app's own namespaces. The monitoring stack
+# is a different kind of thing — it installs cluster-scoped machinery (CRDs,
+# ClusterRoles/Bindings, admission webhooks) and pulls from a third-party Helm
+# repo. Rather than loosen the app project to fit it, monitoring gets its own
+# project with the broader permissions it genuinely needs, so the app project
+# stays least-privilege. (Same separation-of-concerns idea as the app itself.)
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Cluster platform add-ons (monitoring, etc.), delivered by GitOps.
+
+  # Allowed sources: this git repo (for any manifests we author) plus the
+  # prometheus-community Helm repo the kube-prometheus-stack chart comes from.
+  sourceRepos:
+    - https://github.com/genkuroo/url-shortener-k8s.git
+    - https://prometheus-community.github.io/helm-charts
+
+  # Platform add-ons land in their own `monitoring` namespace; `argocd` is here so
+  # the app-of-apps can create this project's child Application objects.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+
+  # Monitoring genuinely needs cluster-scoped kinds (CRDs, ClusterRoles, webhooks),
+  # so this project — unlike the app one — allows any resource, cluster- or
+  # namespace-scoped.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

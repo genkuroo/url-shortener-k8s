@@ -58,3 +58,13 @@ ingress:
   # localtest.me resolves to 127.0.0.1, so this works with no /etc/hosts edit.
   # dev and prod use different subdomains so both can run side by side.
   host: urlshortener.localtest.me
+
+# Observability (Phase 5). Both default OFF so the chart still installs on a
+# cluster with no Prometheus Operator; the dev/prod overlays turn them on.
+serviceMonitor:
+  # Emit a ServiceMonitor so Prometheus scrapes the app's /metrics endpoint.
+  enabled: false
+dashboard:
+  # Ship the Grafana dashboard ConfigMap. Enabled on ONE release (prod) so the
+  # dashboard appears once in Grafana, not once per environment.
+  enabled: false

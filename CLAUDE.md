@@ -50,12 +50,42 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-07-10)
+## Current state (as of 2026-07-13)
 
-**Phase 4 complete — GitOps with Argo CD.** The cluster now **pulls** its desired
-state from git instead of us pushing it. Argo CD (pinned **v3.4.5**, applied from
-the upstream URL by `make argocd-install`) watches this repo and reconciles an
-**app-of-apps** defined under `gitops/`:
+**Phase 5 complete — Observability (Prometheus + Grafana), GitOps-managed.** The
+app now emits Prometheus metrics and both environments are scraped and graphed.
+
+- **App `/metrics`:** `app/main.py` wires `prometheus-fastapi-instrumentator`
+  (pinned **7.1.0** — 8.x needs Starlette ≥1.0, which `fastapi==0.115.6` won't
+  allow). It's registered **before the greedy `GET /{code}` route** or that
+  catch-all would swallow `/metrics` (FastAPI matches routes in definition order).
+- **Monitoring stack via Argo:** `gitops/apps/monitoring.yaml` deploys
+  **kube-prometheus-stack** (pinned chart **87.15.1**) from the prometheus-community
+  Helm repo, under a new **`platform` AppProject** (`gitops/project-platform.yaml`)
+  that has the broad cluster-scoped perms the app project deliberately lacks. Two
+  Argo gotchas handled: `syncOptions: ServerSideApply=true` (the Prometheus CRDs
+  exceed the 256KB last-applied-config annotation limit) and
+  `argocd.argoproj.io/sync-wave: "-1"` (so the operator's CRDs exist before the
+  app's ServiceMonitor syncs). Lean inline values: Alertmanager off, Grafana
+  admin/admin, `serviceMonitorSelectorNilUsesHelmValues: false` (scrape all SMs),
+  `grafana.sidecar.dashboards.searchNamespace: ALL`.
+- **App chart (bumped to 0.2.0):** `templates/servicemonitor.yaml` (gated by
+  `serviceMonitor.enabled`, on for both envs) scrapes the Service's `http` port at
+  `/metrics`; `templates/grafana-dashboard.yaml` ships a dashboard ConfigMap
+  (label `grafana_dashboard: "1"`) that the Grafana sidecar auto-imports — the JSON
+  lives in `charts/url-shortener/dashboards/url-shortener.json` and is embedded via
+  `.Files.Get` (so Grafana's `{{ }}` legend syntax isn't parsed by Helm). The
+  dashboard ships from **prod only** (`dashboard.enabled` prod overlay) so there's
+  one copy; its `namespace` variable switches dev/prod.
+- **Makefile:** `argocd-bootstrap` now also applies the platform project. New
+  targets: `grafana-ui`, `prometheus-ui`, `load-demo`. `make up` brings up
+  monitoring automatically (it's part of the app-of-apps; first sync takes a few
+  min).
+
+**Phase 4 — GitOps with Argo CD.** The cluster **pulls** its desired state from
+git. Argo CD (pinned **v3.4.5**, applied from the upstream URL by
+`make argocd-install`) watches this repo and reconciles an **app-of-apps** under
+`gitops/`:
 
 - `gitops/project.yaml` — an `AppProject` (`url-shortener`) scoping the one source
   repo and the three destination namespaces (`argocd`, `url-shortener-dev`,
@@ -85,8 +115,8 @@ The raw `k8s/00–40` manifests stay in the repo as the Phase 1/2 reference;
 `k8s/ingress-nginx/` is still installed directly (cluster-level infra). Tooling:
 `kind`/`kubectl`/`helm` via Homebrew (helm v4.2.2), Argo CD v3.4.5.
 
-Next: **Phase 5** — Observability (kube-prometheus-stack + a `/metrics` endpoint +
-ServiceMonitor + a Grafana dashboard).
+Next: **Phase 6** — Autoscaling & resilience (resource requests/limits + a
+HorizontalPodAutoscaler on CPU, load-tested with k6/hey).
 
 ## Conventions
 

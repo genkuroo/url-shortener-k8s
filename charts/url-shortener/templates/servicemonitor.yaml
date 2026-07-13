@@ -1,0 +1,37 @@
+{{- if .Values.serviceMonitor.enabled }}
+# ServiceMonitor — tells Prometheus to scrape this release's app for metrics.
+#
+# A ServiceMonitor is a custom resource from the Prometheus Operator (installed by
+# the kube-prometheus-stack). It's the declarative way to add a scrape target: it
+# selects a Service by labels and says which port/path to scrape. The operator
+# turns every ServiceMonitor into Prometheus scrape config automatically — no
+# hand-edited prometheus.yml.
+#
+# Gated behind serviceMonitor.enabled so the chart still installs on a cluster
+# where the operator (and this CRD) isn't present; the dev/prod overlays turn it on.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "url-shortener.fullname" . }}
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+  annotations:
+    # If a first-ever sync races ahead of the operator's CRD, skip the dry-run for
+    # this resource instead of hard-failing (the sync-wave on the monitoring app
+    # should make monitoring land first, but this is a cheap safety net).
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  # Match this release's app Service (same selector the Service itself uses).
+  selector:
+    matchLabels:
+      {{- include "url-shortener.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: http           # the Service's named port (80 -> container 8000)
+      path: /metrics
+      interval: 30s
+{{- end }}

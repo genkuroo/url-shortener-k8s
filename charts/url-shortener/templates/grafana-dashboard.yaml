@@ -1,0 +1,30 @@
+{{- if .Values.dashboard.enabled }}
+# Grafana dashboard, shipped as a ConfigMap.
+#
+# The kube-prometheus-stack Grafana runs a "sidecar" that watches the cluster for
+# ConfigMaps labelled grafana_dashboard=1 and auto-imports their JSON as dashboards
+# — no manual upload, no Grafana API calls. So the app can ship its own dashboard
+# right alongside its other manifests, and it appears in Grafana automatically.
+#
+# The dashboard JSON lives in dashboards/url-shortener.json and is pulled in with
+# .Files.Get, which embeds the file verbatim WITHOUT running it through Helm's
+# templating. That matters: Grafana legend formats use double-curly-brace syntax
+# (e.g. a status label placeholder), which Helm would otherwise try to evaluate
+# and choke on. (Even inside a YAML "#" comment Helm still parses those braces,
+# which is why this note spells it out in words instead of showing them.)
+#
+# Enabled on a single release (prod) via the overlay, so there's exactly one copy
+# of the dashboard in Grafana rather than one per environment; the dashboard's
+# `namespace` variable switches it between dev and prod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "url-shortener.fullname" . }}-dashboard
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+    grafana_dashboard: "1"
+data:
+  url-shortener.json: |
+{{ .Files.Get "dashboards/url-shortener.json" | indent 4 }}
+{{- end }}
