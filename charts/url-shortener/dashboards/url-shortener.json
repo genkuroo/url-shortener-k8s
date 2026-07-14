@@ -111,14 +111,14 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(rate(http_requests_total{namespace=\"$namespace\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=\"$namespace\"}[5m])), 0.0001)"
+          "expr": "(sum(rate(http_requests_total{namespace=\"$namespace\",status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{namespace=\"$namespace\"}[5m])), 0.0001)"
         }
       ]
     },
     {
       "id": 5,
       "type": "stat",
-      "title": "Links created (total)",
+      "title": "Links created (since pod start)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
       "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
@@ -127,7 +127,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(increase(http_requests_total{namespace=\"$namespace\",handler=\"/api/links\",method=\"POST\",status=~\"2..\"}[$__range]))"
+          "expr": "sum(http_requests_total{namespace=\"$namespace\",handler=\"/api/links\",method=\"POST\",status=~\"2..\"})"
         }
       ]
     }

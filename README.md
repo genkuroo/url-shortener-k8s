@@ -30,7 +30,14 @@ GHCR**. App inside the container: **Python + FastAPI** talking to **Postgres**.
 
 Needs Docker, [`kind`](https://kind.sigs.k8s.io/), `kubectl`, and
 [`helm`](https://helm.sh/). The `Makefile` wraps the whole workflow
-(`make help` lists every target):
+(`make help` lists every target).
+
+> **Give the Docker VM enough headroom.** Phases 1–4 ran fine in a 2 GiB VM, but
+> Phase 5's monitoring stack (Prometheus + Grafana + node exporters) needs more —
+> in a 2 GiB Colima VM a worker node went `NotReady` and the API server started
+> timing out under the extra load. **~6 GiB / 4 CPU** is comfortable
+> (`colima start --memory 6 --cpu 4`, or the memory slider in Docker Desktop). See
+> *Notes & gotchas* below for why this over slimming the stack.
 
 ```bash
 make up            # cluster + image + ingress-nginx + Argo CD, which deploys dev + prod
@@ -144,6 +151,29 @@ docker compose up --build      # builds the image, starts app + Postgres
 open http://127.0.0.1:8000
 docker compose down
 ```
+
+## Notes & gotchas (things worth knowing)
+
+- **Sizing the local VM for monitoring.** Adding kube-prometheus-stack tipped a
+  2 GiB Colima VM over its memory ceiling — a worker node went `NotReady` and the
+  API server flapped. Adding *node count* doesn't help (all kind nodes share one
+  Docker VM); the fix is more VM memory. I bumped Colima to **6 GiB / 4 CPU** rather
+  than slimming the stack, because a slimmed stack (dropping node-exporter /
+  kube-state-metrics) would have been a weaker, less honest observability demo and
+  *still* might not have fit — where the extra RAM is the correct, one-line fix and
+  keeps the stack representative of a real deployment. (Alertmanager is still off,
+  since alerting isn't part of this phase.)
+- **Argo + big Helm charts.** kube-prometheus-stack ships some Services into
+  `kube-system` and huge CRDs, so its Argo Application needs `ServerSideApply=true`
+  (the CRDs exceed the 256 KB apply-annotation limit) and its `platform` project
+  must allow the `kube-system` destination. A `sync-wave` makes the operator's CRDs
+  land before the app's ServiceMonitor.
+- **kind can't scrape some control-plane components.** kube-scheduler,
+  kube-controller-manager, etcd, and kube-proxy bind to `127.0.0.1` on kind, so
+  their default monitors are disabled to avoid permanently-`DOWN` targets; kubelet,
+  CoreDNS, nodes, and the app itself are scraped normally.
+- **`/metrics` route ordering.** The app registers `/metrics` *before* its greedy
+  `GET /{code}` route — otherwise the short-code handler would swallow `/metrics`.
 
 ## Build status
 

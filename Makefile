@@ -122,11 +122,11 @@ gitops-up: argocd-install argocd-bootstrap ## Install Argo CD and bootstrap the 
 
 grafana-ui: ## Open the Grafana dashboard at http://localhost:3000 (user: admin, pw: admin)
 	@echo "Grafana at http://localhost:3000  (user 'admin', pw 'admin') — see the 'URL Shortener' dashboard"
-	kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+	kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 
 prometheus-ui: ## Open Prometheus at http://localhost:9090 (Status -> Targets to see scrapes)
 	@echo "Prometheus at http://localhost:9090  (Status -> Targets shows the app scrape endpoints)"
-	kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+	kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090
 
 load-demo: ## Generate demo traffic against prod so the Grafana graphs move (Ctrl-C to stop)
 	@echo "Driving traffic at http://$(HOST_PROD) — watch the Grafana dashboard. Ctrl-C to stop."
