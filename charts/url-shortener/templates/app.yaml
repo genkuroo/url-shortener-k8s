@@ -12,7 +12,14 @@ metadata:
     {{- include "url-shortener.labels" . | nindent 4 }}
     app.kubernetes.io/component: app
 spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # When the HorizontalPodAutoscaler is enabled (prod), we deliberately DON'T set
+  # replicas here: the HPA owns the replica count, and if the chart also declared
+  # it, Argo CD's self-heal would keep reverting the HPA's scaling back to this
+  # static number — the two would fight. Leaving the field out lets the HPA be the
+  # sole owner. Dev (no HPA) keeps its static replica count below.
   replicas: {{ .Values.app.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "url-shortener.selectorLabels" . | nindent 6 }}

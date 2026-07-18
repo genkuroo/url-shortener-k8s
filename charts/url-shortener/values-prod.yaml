@@ -7,6 +7,10 @@
 # scales on CPU *as a percentage of the request*, so a request must exist for it
 # to have a baseline to measure against.
 app:
+  # With autoscaling on (below), the HPA owns the live replica count and the
+  # Deployment no longer declares `replicas`. This value is kept as documentation
+  # of prod's intended baseline; the HPA's minReplicas is what actually holds the
+  # floor at 3.
   replicas: 3
   resources:
     requests:
@@ -15,6 +19,15 @@ app:
     limits:
       cpu: 500m
       memory: 256Mi
+
+# Prod scales on CPU. minReplicas holds prod's 3-replica availability floor; under
+# load the HPA adds replicas up to maxReplicas, then removes them when load drops.
+# Target 60% of the 100m CPU request (= 60m), so sustained traffic trips it.
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 9
+  targetCPUUtilizationPercentage: 60
 
 postgres:
   storage: 1Gi

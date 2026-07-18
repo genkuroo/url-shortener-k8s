@@ -144,6 +144,35 @@ make grafana-ui                           # :3000 (admin/admin) → the "URL Sho
 make load-demo                            # drive traffic and watch the panels move
 ```
 
+### Autoscaling: prod scales itself on CPU (HPA)
+
+Prod runs a **HorizontalPodAutoscaler** — Kubernetes adds and removes app replicas
+to keep average CPU near a target, so the deployment absorbs a traffic spike on its
+own and shrinks back when it passes. Two pieces make it work:
+
+- **metrics-server** — a kind cluster serves no pod-CPU metrics API, so `kubectl
+  top` and any CPU HPA read `<unknown>` out of the box. It's installed the same
+  GitOps way as the monitoring stack: its own Argo Application
+  (`gitops/apps/metrics-server.yaml`) under the `platform` project, pinned, with the
+  one `--kubelet-insecure-tls` flag kind needs (its kubelet serving certs aren't
+  signed by the cluster CA).
+- **The HPA** (in the app chart, `templates/hpa.yaml`, enabled for prod only) —
+  scales the app between **3 and 9 replicas** to hold CPU at **60% of each pod's
+  request**. Dev stays a single static replica; it sets no CPU request, and CPU
+  percentage is meaningless without one.
+
+```bash
+make hpa-watch     # one terminal — TARGETS + REPLICAS, live
+make load-test     # another terminal — fires load from an in-cluster pod
+# TARGETS jumps well past 60%, REPLICAS climb toward 9, then settle back to 3
+# a few minutes after the load stops.
+kubectl -n url-shortener-prod get hpa
+```
+
+The load generator runs **inside the cluster** (a throwaway `hey` pod hitting the
+prod Service directly), so no host tooling is needed and the load fans out across
+replicas as they scale — which is exactly the negative-feedback loop the HPA closes.
+
 ### Try it without Kubernetes (Phase 0 smoke test)
 
 ```bash
@@ -174,10 +203,18 @@ docker compose down
   CoreDNS, nodes, and the app itself are scraped normally.
 - **`/metrics` route ordering.** The app registers `/metrics` *before* its greedy
   `GET /{code}` route — otherwise the short-code handler would swallow `/metrics`.
+- **HPA vs. GitOps fighting over replicas.** If the chart declared a static
+  `replicas` *and* an HPA scaled the deployment, Argo CD's self-heal would keep
+  reverting the HPA's changes back to the declared number. The chart resolves this
+  by **omitting `replicas` entirely when autoscaling is on**, so the HPA is the sole
+  owner of the replica count; the HPA's `minReplicas` holds prod's availability floor.
+- **metrics-server on kind needs `--kubelet-insecure-tls`.** kind's kubelets serve
+  metrics with a self-signed cert the cluster CA didn't issue, so metrics-server
+  rejects them and every node reads "unavailable" until that flag is set.
 
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 5 (observability — Prometheus + Grafana, deployed by Argo CD,
-with a per-environment Grafana dashboard).** Autoscaling (HPA + load testing) is
-next.
+**Currently: Phase 6 (autoscaling & resilience — a CPU HorizontalPodAutoscaler on
+prod, fed by metrics-server, both delivered by Argo CD; load-tested from an
+in-cluster pod).** CI/CD (GitHub Actions → GHCR, GitOps image bumps) is next.

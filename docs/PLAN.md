@@ -106,12 +106,22 @@ Deployment and watch self-heal revert it.
 URL-Shortener dashboard fills in. `make prometheus-ui` → Status→Targets shows both
 app scrape endpoints UP.
 
-## Phase 6 — Autoscaling & resilience
+## Phase 6 — Autoscaling & resilience ✅
 
-- Set resource **requests/limits**; add a **HorizontalPodAutoscaler** on CPU.
-- Load-test with `k6`/`hey` to push CPU past the target.
+- Prod already carried resource **requests/limits** (Phase 3); this phase adds a
+  **HorizontalPodAutoscaler** (app chart, `templates/hpa.yaml`, prod only) that
+  scales the app **3→9 replicas** to hold CPU at **60% of the request**. When
+  autoscaling is on, the Deployment **stops declaring `replicas`** so the HPA — not
+  Argo self-heal — owns the count (otherwise the two fight).
+- An HPA needs a pod-CPU metrics API, which kind doesn't ship, so **metrics-server**
+  is installed the GitOps way — its own Argo Application
+  (`gitops/apps/metrics-server.yaml`, pinned chart 3.13.1) under the `platform`
+  project, with the `--kubelet-insecure-tls` flag kind requires.
+- **Load-tested** from an in-cluster throwaway `hey` pod against the prod Service
+  (`make load-test`), so no host tooling is needed and load fans out across replicas.
 
-**Demo:** `kubectl get hpa -w` shows replicas scale out under load, then back in.
+**Demo:** `make hpa-watch` in one terminal, `make load-test` in another — replicas
+scale out under load, then back in a few minutes after it stops.
 
 ## Phase 7 — CI/CD
 

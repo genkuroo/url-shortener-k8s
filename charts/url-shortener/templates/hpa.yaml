@@ -1,0 +1,34 @@
+{{- if .Values.autoscaling.enabled }}
+# HorizontalPodAutoscaler — the app scales itself on CPU (Phase 6).
+#
+# The HPA watches the app Deployment's average CPU and adds or removes replicas to
+# keep it near a target. CPU is measured as a percentage OF THE POD'S CPU REQUEST,
+# which is why prod sets `app.resources.requests.cpu` (Phase 3) — without a request
+# there's no baseline to take a percentage of, and the HPA reads <unknown>. The
+# request numbers come from metrics-server (installed as its own Argo app).
+#
+# Only rendered when autoscaling is enabled (prod). Dev leaves it off: dev has no
+# CPU request, and one static replica is all it needs.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "url-shortener.fullname" . }}
+  labels:
+    {{- include "url-shortener.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  # Point the HPA at the app Deployment (same name as this release's fullname).
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "url-shortener.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

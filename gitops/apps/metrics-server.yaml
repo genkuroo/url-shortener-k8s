@@ -1,0 +1,47 @@
+# metrics-server.yaml — the Argo Application that installs metrics-server.
+#
+# Phase 6 adds a HorizontalPodAutoscaler that scales the app on CPU. An HPA reads
+# pod CPU from the `metrics.k8s.io` API — and a kind cluster ships nothing that
+# serves it, so `kubectl top` and any CPU HPA read "unknown" until metrics-server
+# is installed. This is that missing piece, delivered the same GitOps way as the
+# monitoring stack: another Argo Application under the `platform` project, pulling
+# the upstream metrics-server Helm chart (pinned) with a lean inline config.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Sync BEFORE the app (default wave 0), like monitoring, so the metrics API is
+    # already being served by the time the app's HPA comes up — the HPA then reads
+    # real CPU immediately instead of sitting at <unknown> waiting for the API.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: platform
+
+  source:
+    repoURL: https://kubernetes-sigs.github.io/metrics-server/
+    chart: metrics-server
+    targetRevision: 3.13.1
+    helm:
+      valuesObject:
+        # kind's kubelets serve their metrics endpoint with a self-signed cert
+        # that isn't signed by the cluster CA, so metrics-server's TLS verification
+        # would reject them and every node would read as "unavailable". This flag
+        # (appended to the chart's default args) tells it to skip that verification
+        # — safe here because it's talking to kubelets inside a local kind cluster.
+        args:
+          - --kubelet-insecure-tls
+
+  destination:
+    server: https://kubernetes.default.svc
+    # kube-system is the conventional home for metrics-server; the platform project
+    # already whitelists it.
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

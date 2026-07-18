@@ -50,9 +50,34 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-07-13)
+## Current state (as of 2026-07-18)
 
-**Phase 5 complete — Observability (Prometheus + Grafana), GitOps-managed.** The
+**Phase 6 complete — Autoscaling & resilience.** Prod scales itself on CPU via a
+HorizontalPodAutoscaler, fed by metrics-server; both are delivered by Argo CD.
+
+- **metrics-server:** kind ships no pod-CPU metrics API (`kubectl top` and any CPU
+  HPA read `<unknown>`), so it's installed the GitOps way — its own Argo Application
+  (`gitops/apps/metrics-server.yaml`, pinned chart **3.13.1**) under the existing
+  `platform` AppProject, `sync-wave: "-1"` (up before the app's HPA). The one config
+  it needs is **`--kubelet-insecure-tls`** (appended to the chart's default args):
+  kind's kubelet serving certs aren't signed by the cluster CA, so without it every
+  node reads "unavailable". The metrics-server Helm repo was added to the platform
+  project's `sourceRepos`.
+- **HPA (app chart, bumped to 0.3.0):** `templates/hpa.yaml` (gated by
+  `autoscaling.enabled`, prod only) scales the app Deployment **3→9 replicas** to
+  hold CPU at **60% of the request** (`autoscaling/v2`, Resource/cpu/Utilization).
+  Enabled in `values-prod.yaml` only — dev sets no CPU request, so a percentage
+  target is meaningless there. **Critical detail:** when `autoscaling.enabled`, the
+  Deployment template **omits `spec.replicas`** so the HPA is the sole owner of the
+  count; if the chart also declared it, Argo self-heal would keep reverting the
+  HPA's scaling. `minReplicas: 3` holds prod's availability floor.
+- **Load test:** `make load-test` runs a throwaway `hey` pod **inside the cluster**
+  (`williamyeh/hey`, `kubectl run --rm`) against the prod Service's `/healthz`, so
+  no host tool is needed and the load fans out across replicas as they scale.
+  `make hpa-watch` tails `kubectl get hpa,deployment -w`. Concurrency/duration are
+  overridable (`LOAD_CONCURRENCY`, `LOAD_DURATION`).
+
+**Phase 5 — Observability (Prometheus + Grafana), GitOps-managed.** The
 app now emits Prometheus metrics and both environments are scraped and graphed.
 
 - **App `/metrics`:** `app/main.py` wires `prometheus-fastapi-instrumentator`
@@ -115,8 +140,8 @@ The raw `k8s/00–40` manifests stay in the repo as the Phase 1/2 reference;
 `k8s/ingress-nginx/` is still installed directly (cluster-level infra). Tooling:
 `kind`/`kubectl`/`helm` via Homebrew (helm v4.2.2), Argo CD v3.4.5.
 
-Next: **Phase 6** — Autoscaling & resilience (resource requests/limits + a
-HorizontalPodAutoscaler on CPU, load-tested with k6/hey).
+Next: **Phase 7** — CI/CD (GitHub Actions: build → push to GHCR → `helm lint` +
+`kubeconform` → bump the Argo-tracked image tag, GitOps-style).
 
 ## Conventions
 

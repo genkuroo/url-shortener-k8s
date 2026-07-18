@@ -42,7 +42,13 @@ ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_V
         lint template helm-dev helm-prod up down uninstall \
         argocd-install argocd-bootstrap argocd-password argocd-ui gitops-up \
         grafana-ui prometheus-ui load-demo \
+        load-test hpa-watch \
         status logs port-forward seed seed-dev restart-app
+
+# Load-test knobs (Phase 6). Override on the command line, e.g.
+#   make load-test LOAD_CONCURRENCY=200 LOAD_DURATION=6m
+LOAD_CONCURRENCY ?= 100
+LOAD_DURATION    ?= 4m
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -140,6 +146,24 @@ load-demo: ## Generate demo traffic against prod so the Grafana graphs move (Ctr
 		sleep 0.3; \
 	done
 
+# --- Autoscaling / resilience (Phase 6) -------------------------------------
+# metrics-server (installed as its own Argo app, gitops/apps/metrics-server.yaml)
+# feeds pod CPU to a HorizontalPodAutoscaler in the prod release, which scales the
+# app between 3 and 9 replicas on CPU. `make up` already installs both. These
+# targets drive load and watch the HPA react. The load generator runs INSIDE the
+# cluster (a throwaway `hey` pod) and hits the prod Service directly, so no host
+# tool is needed and the load fans out across replicas as they scale.
+
+load-test: ## Fire load at prod from an in-cluster pod to trip the HPA (watch: make hpa-watch)
+	@echo "Firing $(LOAD_CONCURRENCY) concurrent clients at prod for $(LOAD_DURATION)."
+	@echo "Run 'make hpa-watch' in another terminal to watch replicas scale out, then back in."
+	kubectl -n $(NS_PROD) run load-test --rm -i --restart=Never --image=williamyeh/hey -- \
+		-z $(LOAD_DURATION) -c $(LOAD_CONCURRENCY) http://prod-url-shortener/healthz
+
+hpa-watch: ## Watch the prod HPA add/remove app replicas live
+	@echo "Watching the prod HPA (Ctrl-C to stop). TARGETS jumps past 60% under load, then REPLICAS climb."
+	kubectl -n $(NS_PROD) get hpa,deployment -w
+
 # Phase 4 made Argo CD the app deployer (GitOps): `up` no longer runs helm-dev/
 # helm-prod directly — it installs Argo CD and bootstraps the app-of-apps, and
 # Argo pulls the chart from git and deploys both releases. `load` still builds and
@@ -149,6 +173,7 @@ up: cluster-up load ingress-install argocd-install argocd-bootstrap ## Full stac
 	@echo "\nAll up (GitOps).  prod: http://$(HOST_PROD)   dev: http://$(HOST_DEV)"
 	@echo "Argo:     make argocd-ui   (https://localhost:8080, user 'admin', pw: make argocd-password)"
 	@echo "Grafana:  make grafana-ui  (http://localhost:3000, admin/admin — the monitoring app may take a few min to sync)"
+	@echo "Scale:    make hpa-watch  (one terminal)  +  make load-test  (another) — watch prod autoscale on CPU"
 	@echo "Then:     make seed && make seed-dev && make load-demo"
 
 down: cluster-down ## Tear everything down (deletes the whole cluster)

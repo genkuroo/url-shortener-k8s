@@ -32,6 +32,18 @@ app:
     initialDelaySeconds: 10
     periodSeconds: 10
 
+# Autoscaling (Phase 6). Off by default so the chart still installs on a cluster
+# with no metrics-server; the prod overlay turns it on. When enabled, a
+# HorizontalPodAutoscaler owns the replica count (the Deployment stops declaring
+# `app.replicas`) and scales the app on CPU. Requires CPU requests to be set
+# (see app.resources) — CPU is measured as a percentage of the request.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  # Target average CPU across pods, as a percentage of each pod's CPU request.
+  targetCPUUtilizationPercentage: 60
+
 postgres:
   enabled: true
   image: postgres:16-alpine

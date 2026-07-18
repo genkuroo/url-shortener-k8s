@@ -17,11 +17,13 @@ metadata:
 spec:
   description: Cluster platform add-ons (monitoring, etc.), delivered by GitOps.
 
-  # Allowed sources: this git repo (for any manifests we author) plus the
-  # prometheus-community Helm repo the kube-prometheus-stack chart comes from.
+  # Allowed sources: this git repo (for any manifests we author) plus the two
+  # upstream Helm repos this project's add-ons come from — prometheus-community
+  # (kube-prometheus-stack, Phase 5) and metrics-server (Phase 6).
   sourceRepos:
     - https://github.com/genkuroo/url-shortener-k8s.git
     - https://prometheus-community.github.io/helm-charts
+    - https://kubernetes-sigs.github.io/metrics-server/
 
   # Platform add-ons land in their own `monitoring` namespace; `argocd` is here so
   # the app-of-apps can create this project's child Application objects. kube-system
