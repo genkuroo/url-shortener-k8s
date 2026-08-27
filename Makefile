@@ -39,7 +39,7 @@ ARGOCD_VERSION := v3.4.5
 ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_VERSION)/manifests/install.yaml
 
 .PHONY: help cluster-up cluster-down build load ingress-install \
-        lint template helm-dev helm-prod up down uninstall \
+        lint ci-validate template helm-dev helm-prod up down uninstall \
         argocd-install argocd-bootstrap argocd-password argocd-ui gitops-up \
         grafana-ui prometheus-ui load-demo \
         load-test hpa-watch \
@@ -78,6 +78,21 @@ lint: ## Validate the chart renders for both environments
 
 template: ## Render the chart to stdout (dry run, no cluster needed)
 	helm template prod $(CHART) -f $(CHART)/values-prod.yaml
+
+# ci-validate mirrors exactly what the `validate` job in .github/workflows/ci.yml
+# runs, so you can catch a broken chart before pushing. Needs kubeconform on PATH
+# (brew install kubeconform). The CRD schema-location lets it validate the
+# ServiceMonitor (a Prometheus CRD, not core Kubernetes).
+CRD_SCHEMA := https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+ci-validate: lint ## Run the CI validation locally (helm lint + kubeconform on both envs)
+	@for env in dev prod; do \
+		echo "== kubeconform $$env =="; \
+		helm template $$env $(CHART) -f $(CHART)/values-$$env.yaml \
+			| kubeconform -strict -summary \
+				-schema-location default \
+				-schema-location '$(CRD_SCHEMA)' \
+				-ignore-missing-schemas; \
+	done
 
 # helm-dev / helm-prod are the Phase-3 manual deploy path, kept for reference and
 # for `helm template`/debugging. Since Phase 4, Argo CD owns the live releases, so

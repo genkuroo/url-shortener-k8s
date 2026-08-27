@@ -1,0 +1,169 @@
+# ci.yml — the project's CI/CD pipeline (Phase 7).
+#
+# The whole delivery story in one file:
+#
+#   validate  — on every push and PR: does the Helm chart still render, and are
+#               the resulting manifests valid Kubernetes? (helm lint + kubeconform)
+#   build     — only after validate passes, and only on main: build the app image
+#               and push it to GHCR, tagged with the commit SHA (immutable) + latest.
+#   deploy    — GitOps image bump: write the new SHA tag into values-dev.yaml and
+#               commit it back to main. Argo CD sees the change and rolls dev.
+#
+# Prod is deliberately NOT auto-deployed here — that's a manual promotion
+# (promote.yml). This mirrors how real teams ship: every green commit flows to
+# dev automatically; a human decides when it goes to prod.
+#
+# Nothing in this pipeline ever runs `kubectl apply` against the cluster. CI's job
+# ends at "commit the desired state to git"; Argo CD is what actually changes the
+# cluster (pull-based GitOps). That's the whole point of Phase 4 — CI has no
+# cluster credentials, so a leaked CI token can't touch the running app.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# The image lives at ghcr.io/<owner>/url-shortener. GITHUB_REPOSITORY_OWNER is
+# lowercased into the tag below (GHCR requires lowercase; "genkuroo" already is,
+# but a fork under a mixed-case org would otherwise break).
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/url-shortener
+
+jobs:
+  # --- 1. Validate ----------------------------------------------------------
+  # Runs on every push AND every PR, so a bad chart is caught before merge.
+  # Renders both env overlays and checks the output two ways:
+  #   helm lint    — chart-level sanity (templates parse, values wire up)
+  #   kubeconform  — every rendered object validates against the Kubernetes API
+  #                  schema (and the Prometheus CRD schema for the ServiceMonitor)
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: helm lint (dev + prod overlays)
+        run: |
+          helm lint charts/url-shortener -f charts/url-shortener/values-dev.yaml
+          helm lint charts/url-shortener -f charts/url-shortener/values-prod.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+          sudo mv /tmp/kubeconform /usr/local/bin/
+
+      - name: kubeconform (validate rendered manifests)
+        # -strict rejects unknown fields; the CRD schema-location lets it validate
+        # the ServiceMonitor (a Prometheus CRD, not core Kubernetes), and
+        # -ignore-missing-schemas keeps it from failing on any other CRD we add
+        # later before its schema is published.
+        run: |
+          CRD='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          for env in dev prod; do
+            echo "::group::kubeconform $env"
+            helm template "$env" charts/url-shortener -f "charts/url-shortener/values-$env.yaml" \
+              | kubeconform -strict -summary \
+                  -schema-location default \
+                  -schema-location "$CRD" \
+                  -ignore-missing-schemas
+            echo "::endgroup::"
+          done
+
+  # --- 2. Build & push ------------------------------------------------------
+  # Only on a push to main (not PRs — a fork PR shouldn't be able to push an
+  # image), and only after validate is green.
+  build:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push to GHCR
+    outputs:
+      # The short SHA is the image tag; the deploy job reads it back from here.
+      image_tag: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag (short SHA)
+        id: meta
+        run: echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # auto-provided, scoped to this repo
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          # Two tags: the immutable SHA (what GitOps pins to) and a moving
+          # :latest for humans poking at the package. GitOps never uses :latest.
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.short_sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # --- 3. Deploy to dev (GitOps image bump) ---------------------------------
+  # The CD half. CI doesn't talk to the cluster — it edits git. It rewrites the
+  # image repo+tag in values-dev.yaml to the freshly-built SHA and commits back to
+  # main. Argo CD (watching main) then syncs dev to the new image on its own.
+  deploy-dev:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # commit the values bump back to main
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        uses: mikefarah/yq@v4.44.3
+
+      - name: Bump dev image to the new SHA
+        env:
+          REG: ${{ env.REGISTRY }}
+          IMG: ${{ env.IMAGE_NAME }}
+          TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          F=charts/url-shortener/values-dev.yaml
+          # Point dev at the registry image (GHCR) and pull it Always — the
+          # default chart repo is the bare local "url-shortener" from the
+          # kind-load era. Once CI owns the image, dev pulls it by SHA.
+          yq -i '.image.repository = strenv(REG) + "/" + strenv(IMG)' "$F"
+          yq -i '.image.tag = strenv(TAG)' "$F"
+          yq -i '.image.pullPolicy = "IfNotPresent"' "$F"
+
+      - name: Commit the bump (if anything changed)
+        run: |
+          F=charts/url-shortener/values-dev.yaml
+          if git diff --quiet -- "$F"; then
+            echo "values-dev.yaml already at this image; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$F"
+          # [skip ci] so this bot commit doesn't retrigger the whole pipeline
+          # (it changes no app code, and it would loop otherwise).
+          git commit -m "ci: deploy ${{ needs.build.outputs.image_tag }} to dev [skip ci]"
+          git push
