@@ -71,9 +71,21 @@ Argo CD reconciles from there.
 - **First run green on the first attempt** (2026-08-26): validate 7s, build 39s,
   deploy-dev 6s → `ci: deploy d6b6fba to dev [skip ci]`. The GHCR package is
   **public**, so anonymous pulls (and `promote.yml`'s check) work.
-- ⚠️ **Not yet verified in-cluster:** Colima/kind was down at the time, so Argo
-  rolling dev to the GHCR image hasn't been observed. Bring the cluster up and
-  confirm dev's pod runs `ghcr.io/genkuroo/url-shortener:<sha>`.
+- ⚠️ **Images must be multi-arch.** GitHub's runners are x86; the kind nodes are
+  **arm64** (Apple Silicon/Colima). The first amd64-only image pulled with
+  `no match for platform in manifest`. The build now runs
+  `docker/setup-qemu-action@v3` with `platforms: linux/amd64,linux/arm64` so one
+  image index serves both (build 39s → ~1m45s, arm64 emulated). Don't drop that.
+- ⚠️ **Argo's sync state goes stale across a cluster outage.** After a Colima
+  restart every app read `Synced` while actually pinned to an 18-day-old commit —
+  "Synced" means "matches the revision I last fetched," not "matches `main`." Force
+  a re-poll with
+  `kubectl annotate app <name> -n argocd argocd.argoproj.io/refresh=hard --overwrite`.
+- ✅ **Verified in-cluster 2026-08-26:** Argo rolled dev to
+  `ghcr.io/genkuroo/url-shortener:2055e3a`; pod Running, app served through the
+  ingress (created a link, 307 redirect followed, click recorded in `/stats`), all
+  five Applications Synced/Healthy. The rolling update kept the old pod serving
+  throughout the failed-pull episode, so dev never went down.
 - Remaining work is **stretch only**: EKS-ready Terraform, and
   sealed-secrets/external-secrets so the DB Secret isn't plaintext in git.
 - Minor upkeep: Actions warns `actions/checkout@v4`, `azure/setup-helm@v4`, and the

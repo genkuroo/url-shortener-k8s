@@ -156,6 +156,36 @@ regardless). Note `values-dev.yaml` had **no `image:` block** before this — yq
 created it — so dev moved off the `kind load`ed local image onto GHCR, while
 **prod stays on the local image until its first promotion**.
 
+### The one real bug: CPU architecture
+
+A green pipeline still couldn't deploy. The first pull on the cluster failed with
+**`no match for platform in manifest`** — GitHub's runners are **x86**, so
+`docker/build-push-action` published an **amd64-only** image, while the kind nodes
+run on **Apple Silicon (arm64)** via Colima. The registry had the image; the nodes
+had no layer they could execute.
+
+Fix: add `docker/setup-qemu-action@v3` and `platforms: linux/amd64,linux/arm64`
+to the build step, so one build publishes an **image index** and each node pulls
+its own match. Costs build time (39s → ~1m45s, since arm64 is emulated under QEMU)
+and is the same lesson as the ECS project's ARM64/Graviton images — with the
+architectures reversed.
+
+Worth noting what *didn't* break: dev never went down. The rolling update kept the
+old pod serving while the new one failed to pull, so the outage was confined to
+"the new version isn't live yet."
+
+**Verified in-cluster (2026-08-26):** after the multi-arch fix, Argo rolled dev to
+`ghcr.io/genkuroo/url-shortener:2055e3a`, the pod went Running, and the app served
+through the ingress — created a link, followed the 307 redirect, and confirmed the
+click landed in `/stats`. All five Argo Applications Synced/Healthy.
+
+⚠️ **Argo's cache goes stale across a cluster outage.** After Colima restarted, all
+apps reported `Synced` while actually sitting on the Phase-6 commit (`reconciledAt`
+was 18 days old). A `kubectl annotate app <name> argocd.argoproj.io/refresh=hard`
+forces a re-poll. "Synced" means "matches the revision I last fetched," not
+"matches `main`."
+
+
 **Demo:** a green pipeline run; a commit produces a new image that Argo deploys.
 
 ## Stretch

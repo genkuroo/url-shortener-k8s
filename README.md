@@ -208,6 +208,15 @@ docker compose down
   reverting the HPA's changes back to the declared number. The chart resolves this
   by **omitting `replicas` entirely when autoscaling is on**, so the HPA is the sole
   owner of the replica count; the HPA's `minReplicas` holds prod's availability floor.
+- **A green pipeline still can't deploy the wrong CPU architecture.** GitHub's
+  runners are x86, so the first build published an **amd64-only** image; the kind
+  nodes run on Apple Silicon, and the pull failed with `no match for platform in
+  manifest`. The build now emits a multi-arch image index
+  (`platforms: linux/amd64,linux/arm64` via QEMU). The rolling update kept the old
+  pod serving throughout, so the failure cost a deploy, not an outage.
+- **Argo CD's "Synced" is relative to the last revision it fetched.** After a
+  cluster outage every Application read `Synced` while sitting on a weeks-old
+  commit; a hard refresh (`argocd.argoproj.io/refresh=hard`) forces a re-poll.
 - **metrics-server on kind needs `--kubelet-insecure-tls`.** kind's kubelets serve
   metrics with a self-signed cert the cluster CA didn't issue, so metrics-server
   rejects them and every node reads "unavailable" until that flag is set.
