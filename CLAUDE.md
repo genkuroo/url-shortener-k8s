@@ -81,6 +81,12 @@ Argo CD reconciles from there.
   "Synced" means "matches the revision I last fetched," not "matches `main`." Force
   a re-poll with
   `kubectl annotate app <name> -n argocd argocd.argoproj.io/refresh=hard --overwrite`.
+- ✅ **Prod promotion verified 2026-08-26:** `promote.yml` (blank input) resolved
+  dev's tag, verified it in GHCR, and committed the bump; Argo rolled all 3 prod
+  replicas onto `ghcr.io/genkuroo/url-shortener:ba71052`. A marker link created on
+  the old image kept its `created_at` and click history across the swap — the
+  Postgres PVC is genuinely separate state. **Both envs are now on GHCR**, so the
+  dev/prod image-source asymmetry noted above is resolved.
 - ✅ **Verified in-cluster 2026-08-26:** Argo rolled dev to
   `ghcr.io/genkuroo/url-shortener:2055e3a`; pod Running, app served through the
   ingress (created a link, 307 redirect followed, click recorded in `/stats`), all

@@ -185,6 +185,21 @@ was 18 days old). A `kubectl annotate app <name> argocd.argoproj.io/refresh=hard
 forces a re-poll. "Synced" means "matches the revision I last fetched," not
 "matches `main`."
 
+**Prod promotion verified (2026-08-26).** Ran `promote.yml` with a blank input to
+exercise the default path: it resolved dev's tag (`ba71052`), confirmed the image
+in GHCR, and committed `ci: promote ba71052 to prod [skip ci]`. Argo then rolled
+prod — a genuine staged rollout across 3 replicas, old pods serving while new ones
+came up. All three prod pods now run the GHCR image.
+
+**The state claim holds:** a marker link created on the *old* image kept its exact
+`created_at` and all 3 click timestamps across the swap, and new clicks continued
+to accumulate on the same row — the Postgres StatefulSet's PVC is genuinely
+separate state, untouched by an app-image change.
+
+**The HPA still owns the replica count.** The rendered Deployment declares no
+`replicas:` field; the live object shows one only because the HPA writes it through
+the scale subresource. Argo doesn't manage that field, so self-heal can't fight it.
+
 
 **Demo:** a green pipeline run; a commit produces a new image that Argo deploys.
 
