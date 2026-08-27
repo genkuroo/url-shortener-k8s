@@ -19,7 +19,6 @@ app:
     limits:
       cpu: 500m
       memory: 256Mi
-
 # Prod scales on CPU. minReplicas holds prod's 3-replica availability floor; under
 # load the HPA adds replicas up to maxReplicas, then removes them when load drops.
 # Target 60% of the 100m CPU request (= 60m), so sustained traffic trips it.
@@ -28,7 +27,6 @@ autoscaling:
   minReplicas: 3
   maxReplicas: 9
   targetCPUUtilizationPercentage: 60
-
 postgres:
   storage: 1Gi
   resources:
@@ -38,13 +36,15 @@ postgres:
     limits:
       cpu: 500m
       memory: 512Mi
-
 ingress:
   host: urlshortener.localtest.me
-
 # Prod is scraped AND ships the single shared Grafana dashboard ConfigMap (the
 # dashboard's `namespace` variable switches it between dev and prod).
 serviceMonitor:
   enabled: true
 dashboard:
   enabled: true
+image:
+  repository: ghcr.io/genkuroo/url-shortener
+  tag: ba71052
+  pullPolicy: IfNotPresent
