@@ -1,0 +1,102 @@
+# promote.yml — promote an image to prod (Phase 7).
+#
+# Dev deploys automatically on every green commit (see ci.yml). Prod does not —
+# shipping to prod is a deliberate human decision. This workflow is that decision,
+# as a button: run it, give it the image tag to promote (defaults to whatever dev
+# is currently running), and it writes that tag into values-prod.yaml and commits.
+# Argo CD then rolls prod to match.
+#
+# Same GitOps discipline as the rest of the project: this never touches the
+# cluster. It edits git; Argo reconciles. The "approval" is the act of running the
+# workflow — visible in the Actions tab as an audit trail of who promoted what.
+
+name: Promote to prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (short SHA) to promote to prod. Leave blank to promote whatever dev is currently on."
+        required: false
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/url-shortener
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # commit the values bump back to main
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        uses: mikefarah/yq@v4.44.3
+
+      - name: Resolve the tag to promote
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            # Blank input → promote exactly what dev is running now.
+            TAG=$(yq '.image.tag' charts/url-shortener/values-dev.yaml)
+            echo "No tag given; promoting dev's current image: $TAG"
+          fi
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::Could not resolve an image tag to promote." >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the image exists in GHCR
+        # Guard against promoting a typo'd tag that was never built. A HEAD on the
+        # manifest via the registry API returns 200 only if that tag exists.
+        env:
+          REG: ${{ env.REGISTRY }}
+          IMG: ${{ env.IMAGE_NAME }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # An anonymous pull token is enough to read a public package's manifest.
+          TOKEN=$(curl -sSL "https://ghcr.io/token?scope=repository:${IMG}:pull" | yq '.token')
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${IMG}/manifests/${TAG}")
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Image ${REG}/${IMG}:${TAG} not found in GHCR (HTTP ${CODE}). Build it first." >&2
+            exit 1
+          fi
+          echo "Found ${REG}/${IMG}:${TAG} in GHCR."
+
+      - name: Bump prod image to the promoted tag
+        env:
+          REG: ${{ env.REGISTRY }}
+          IMG: ${{ env.IMAGE_NAME }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          F=charts/url-shortener/values-prod.yaml
+          yq -i '.image.repository = strenv(REG) + "/" + strenv(IMG)' "$F"
+          yq -i '.image.tag = strenv(TAG)' "$F"
+          yq -i '.image.pullPolicy = "IfNotPresent"' "$F"
+
+      - name: Commit the promotion (if anything changed)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          F=charts/url-shortener/values-prod.yaml
+          if git diff --quiet -- "$F"; then
+            echo "prod is already on $TAG; nothing to promote."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$F"
+          git commit -m "ci: promote $TAG to prod [skip ci]"
+          git push
