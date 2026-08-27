@@ -123,11 +123,38 @@ app scrape endpoints UP.
 **Demo:** `make hpa-watch` in one terminal, `make load-test` in another — replicas
 scale out under load, then back in a few minutes after it stops.
 
-## Phase 7 — CI/CD
+## Phase 7 — CI/CD ✅
 
-- **GitHub Actions**: on push, build the image, push to **GHCR**, run `helm lint`
-  + `kubeconform` (manifest validation), and bump the image tag in the
-  Argo-tracked values file (GitOps-style image update).
+- **`ci.yml` — three jobs, each gated on the last.** `validate` runs on every push
+  *and* PR: `helm lint` plus `kubeconform -strict` over both rendered env overlays,
+  with the datree CRD catalog as a second schema source so the Phase-5
+  ServiceMonitor validates instead of being skipped. `build` (main only) builds
+  `app/Dockerfile` and pushes to **GHCR** tagged with the immutable **short SHA**
+  (plus a moving `latest` for humans — GitOps never references it). `deploy-dev`
+  writes that repo+tag into `values-dev.yaml` and **commits it back to main**.
+- **CI never touches the cluster.** The pipeline's last act is a commit; Argo CD
+  (watching `main`, auto-sync + self-heal since Phase 4) is what changes the
+  cluster. So CI holds **no cluster credentials** — a leaked CI token gets an
+  attacker a registry image and a revertible commit, not a foothold in Kubernetes.
+  The bot commit carries `[skip ci]`, and `GITHUB_TOKEN` pushes don't retrigger
+  workflows anyway, so there's no loop.
+- **`promote.yml` — prod is a human decision.** A `workflow_dispatch` that resolves
+  a tag (blank input = whatever dev is on), **verifies it exists in GHCR** via an
+  anonymous manifest HEAD before writing it (so a typo'd tag fails loudly instead
+  of putting prod in `ImagePullBackOff`), then commits to `values-prod.yaml`.
+  Running the workflow *is* the approval, and the Actions tab is the audit trail.
+- **`make ci-validate`** mirrors the `validate` job locally (needs `kubeconform` on
+  PATH) so a broken chart is caught before pushing.
+
+**First run (2026-08-26):** green end-to-end on the first attempt — validate 7s,
+build 39s, deploy-dev 6s — producing the bot commit
+`ci: deploy d6b6fba to dev [skip ci]`. Three predicted snags didn't materialize:
+the GHCR package came out **public** (anonymous manifest pull returns 200, so
+`promote.yml`'s check works), the `contents: write` job permission was enough to
+push to `main`, and the `mikefarah/yq` step worked (`ubuntu-latest` ships yq v4
+regardless). Note `values-dev.yaml` had **no `image:` block** before this — yq
+created it — so dev moved off the `kind load`ed local image onto GHCR, while
+**prod stays on the local image until its first promotion**.
 
 **Demo:** a green pipeline run; a commit produces a new image that Argo deploys.
 

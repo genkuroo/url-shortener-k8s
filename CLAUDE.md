@@ -50,7 +50,34 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-07-18)
+## Current state (as of 2026-08-26)
+
+**Phase 7 complete — CI/CD (GitHub Actions + GHCR), the final planned phase.**
+The delivery loop closes: push to `main` → `validate` (helm lint + kubeconform on
+both overlays) → `build` (image to GHCR, tagged with the immutable short SHA) →
+`deploy-dev` (writes that tag into `values-dev.yaml` and **commits back to main**).
+Argo CD reconciles from there.
+
+- **CI has no cluster credentials.** Nothing in the pipeline runs `kubectl`; it
+  ends at committing desired state to git, and the in-cluster Argo CD pulls. That's
+  the payoff of Phase 4 — a leaked CI token can't reach Kubernetes.
+- **Prod is not auto-deployed.** `.github/workflows/promote.yml` is a manual
+  `workflow_dispatch` that defaults to whatever dev is running, verifies the tag
+  exists in GHCR before writing it, and commits to `values-prod.yaml`.
+- **Image source now differs per env.** Neither values overlay had an `image:`
+  block before Phase 7; CI created one in `values-dev.yaml`, so **dev pulls from
+  GHCR** while **prod still uses the `kind load`ed local image** until its first
+  promotion. Expect that asymmetry until you run `promote.yml` once.
+- **First run green on the first attempt** (2026-08-26): validate 7s, build 39s,
+  deploy-dev 6s → `ci: deploy d6b6fba to dev [skip ci]`. The GHCR package is
+  **public**, so anonymous pulls (and `promote.yml`'s check) work.
+- ⚠️ **Not yet verified in-cluster:** Colima/kind was down at the time, so Argo
+  rolling dev to the GHCR image hasn't been observed. Bring the cluster up and
+  confirm dev's pod runs `ghcr.io/genkuroo/url-shortener:<sha>`.
+- Remaining work is **stretch only**: EKS-ready Terraform, and
+  sealed-secrets/external-secrets so the DB Secret isn't plaintext in git.
+- Minor upkeep: Actions warns `actions/checkout@v4`, `azure/setup-helm@v4`, and the
+  `docker/*` actions still target Node 20 (forced onto Node 24). Bump when convenient.
 
 **Phase 6 complete — Autoscaling & resilience.** Prod scales itself on CPU via a
 HorizontalPodAutoscaler, fed by metrics-server; both are delivered by Argo CD.

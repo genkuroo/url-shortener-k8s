@@ -215,6 +215,12 @@ docker compose down
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**Currently: Phase 6 (autoscaling & resilience — a CPU HorizontalPodAutoscaler on
-prod, fed by metrics-server, both delivered by Argo CD; load-tested from an
-in-cluster pod).** CI/CD (GitHub Actions → GHCR, GitOps image bumps) is next.
+**All seven planned phases are complete**, through Phase 7 (CI/CD): a push to
+`main` is validated (`helm lint` + `kubeconform` on both env overlays), built and
+pushed to GHCR under its commit SHA, and then written into `values-dev.yaml` and
+**committed back to git** — where Argo CD picks it up. The pipeline never runs
+`kubectl`, so CI holds no cluster credentials. Prod is a deliberate manual
+promotion (`promote.yml`), not an automatic deploy.
+
+Remaining ideas are stretch only: EKS-ready Terraform, and
+sealed-secrets/external-secrets so the DB Secret isn't plaintext in git.
