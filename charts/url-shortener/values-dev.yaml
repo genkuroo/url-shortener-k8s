@@ -7,14 +7,15 @@
 # database volume — cheap and fast to spin up.
 app:
   replicas: 1
-
 postgres:
   storage: 512Mi
-
 ingress:
   host: dev.urlshortener.localtest.me
-
 # Scrape dev too, so the dashboard's namespace switcher has a dev option. The
 # dashboard ConfigMap itself is shipped by prod only (see values-prod.yaml).
 serviceMonitor:
   enabled: true
+image:
+  repository: ghcr.io/genkuroo/url-shortener
+  tag: d6b6fba
+  pullPolicy: IfNotPresent
