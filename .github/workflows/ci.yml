@@ -106,6 +106,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}   # auto-provided, scoped to this repo
 
+      # QEMU lets the x86 runner emulate arm64 so one build produces both
+      # architectures. Needed because the runners are amd64 but the local kind
+      # cluster runs on Apple Silicon (arm64) — a single-arch image fails to pull
+      # there with "no match for platform in manifest".
+      - name: Set up QEMU (for cross-arch builds)
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -114,6 +121,9 @@ jobs:
         with:
           context: ./app
           push: true
+          # Multi-arch: amd64 for cloud/CI, arm64 for the Apple Silicon kind
+          # cluster. Publishes one image index so each node pulls its own match.
+          platforms: linux/amd64,linux/arm64
           # Two tags: the immutable SHA (what GitOps pins to) and a moving
           # :latest for humans poking at the package. GitOps never uses :latest.
           tags: |
