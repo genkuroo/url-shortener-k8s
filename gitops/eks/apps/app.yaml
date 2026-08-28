@@ -1,0 +1,40 @@
+# app.yaml — the URL shortener release on EKS.
+#
+# Point of comparison: this file is almost character-for-character the same as
+# gitops/apps/prod.yaml. Same repo, same chart path, same sync policy. The only
+# real differences are the values file and the namespace.
+#
+# That similarity IS the deliverable. Moving to a managed Kubernetes service in a
+# different account, on different hardware, on a different CPU architecture, cost
+# one values file — because the chart never encoded anything about kind.
+#
+# One release here, not the dev+prod pair kind runs: a second release would mean
+# a second Postgres StatefulSet and a second EBS volume for no extra demo value.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: eks
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: url-shortener
+
+  source:
+    repoURL: https://github.com/genkuroo/url-shortener-k8s.git
+    targetRevision: main
+    path: charts/url-shortener
+    helm:
+      valueFiles:
+        - values-eks.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: url-shortener-eks
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -9,5 +9,19 @@ kubeconfig
 *.kubeconfig
 .env
 
+# Terraform (EKS stretch phase)
+# State files record real infrastructure and can contain sensitive values; tfvars
+# may hold account-specific settings. Only terraform.tfvars.example is committed.
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+# The provider lock file IS committed (same as url-shortener-aws/infra) — it pins
+# provider versions so a later `terraform init` resolves exactly what was validated.
+!terraform/.terraform.lock.hcl
+
 # OS
 .DS_Store

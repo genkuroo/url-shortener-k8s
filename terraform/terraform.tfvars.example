@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars and edit as needed. terraform.tfvars is gitignored
+# (it can hold values you don't want committed); this example is the template.
+#
+# Every value below has a working default in variables.tf — an empty tfvars file
+# is a valid config. These are the knobs you're most likely to touch.
+
+# region  = "us-east-1"
+# project = "url-shortener-k8s"
+
+# --- Capacity ---------------------------------------------------------------
+# Defaults (2 x t4g.medium) fit the app + Postgres + Argo CD + ingress-nginx with
+# monitoring OFF. Before enabling kube-prometheus-stack, raise one of these:
+# node_instance_type = "t4g.large"
+# node_desired_size  = 3
+
+# --- Control-plane logs ------------------------------------------------------
+# Off by default so a throwaway cluster doesn't accrue CloudWatch charges.
+# On EKS this is the ONLY way to observe the control plane — Prometheus can't
+# scrape kube-scheduler / controller-manager / etcd, because AWS runs them.
+# cluster_log_types = ["api", "audit"]
+
+# --- API endpoint access -----------------------------------------------------
+# Defaults to open, because kubectl runs from a laptop with a changing IP.
+# Narrow it for anything longer-lived than a demo:
+# endpoint_public_access_cidrs = ["203.0.113.4/32"]

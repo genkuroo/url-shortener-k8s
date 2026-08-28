@@ -205,6 +205,45 @@ the scale subresource. Argo doesn't manage that field, so self-heal can't fight 
 
 ## Stretch
 
-- **EKS-ready:** Terraform for an EKS cluster so the same manifests deploy to
-  real cloud on demand (tear down after, like the other AWS projects).
+### EKS-ready Terraform — written, not yet applied
+
+Terraform for a real **Amazon EKS** cluster, so the same chart and the same Argo
+CD setup deploy to managed Kubernetes on demand. Full runbook in
+[`docs/EKS.md`](EKS.md).
+
+**The application-side cost of the whole port is one values file.** The chart
+templates, the app, the Dockerfile and both CI workflows are untouched — which is
+the claim the port exists to test. The only template change is a `{{- with }}`
+guard letting `ingress.host` be empty (kind's overlays still render their hosts
+identically; the EKS overlay renders a host-less rule that matches the load
+balancer's generated DNS name).
+
+- **`terraform/`** — VPC across 2 AZs with the **ELB discovery tags** that
+  LoadBalancer Services silently depend on, one NAT gateway, the EKS control
+  plane, a **Graviton (arm64) managed node group**, the baseline add-ons, and the
+  **EBS CSI driver with an IRSA role**. IRSA is the genuinely new concept: an
+  OIDC provider on the cluster lets one named ServiceAccount assume one IAM role,
+  instead of granting the whole node group permission to create volumes.
+- **arm64 nodes come free** from Phase 7's multi-arch image — the fix made for an
+  Apple Silicon laptop is what allows ~20%-cheaper `t4g` instances.
+- **`gitops/eks/`** — a second app-of-apps tree. Both clusters watch the same
+  repo, so EKS needs its own desired state; otherwise it would deploy kind's
+  `*.localtest.me` hostnames and kind's `--kubelet-insecure-tls` workaround.
+- **Storage is the trap.** kind bundles a local-path provisioner; EKS ships no
+  default StorageClass at all, so the chart's PVC would sit Pending forever. The
+  chart deliberately doesn't name a `storageClassName`, so marking gp3 default is
+  enough — no template change.
+- **Monitoring is off** on EKS for now (kube-prometheus-stack is what melted the
+  2 GiB Colima VM in Phase 5). metrics-server is still installed, so the HPA works.
+
+**Status:** code and docs complete and validated locally (`terraform validate`,
+`helm lint`, `kubeconform`). **Not yet applied** — that's a ~3-hour block costing
+about $1. See the verification checklist in `docs/EKS.md`.
+
+**Demo:** `make eks-up` → `make eks-bootstrap` → `make eks-url`, then the same
+smoke test kind gets: create a link, follow the redirect, see the click in
+`/stats` — served from EC2 instead of a laptop, from the same commit.
+
+### Still open
+
 - **sealed-secrets / external-secrets** so the DB Secret isn't plaintext in git.

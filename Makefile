@@ -43,7 +43,9 @@ ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_V
         argocd-install argocd-bootstrap argocd-password argocd-ui gitops-up \
         grafana-ui prometheus-ui load-demo \
         load-test hpa-watch \
-        status logs port-forward seed seed-dev restart-app
+        status logs port-forward seed seed-dev restart-app \
+        eks-init eks-plan eks-up eks-kubeconfig eks-ingress eks-bootstrap \
+        eks-url eks-status eks-seed eks-down
 
 # Load-test knobs (Phase 6). Override on the command line, e.g.
 #   make load-test LOAD_CONCURRENCY=200 LOAD_DURATION=6m
@@ -220,3 +222,87 @@ seed: ## Create demo links through the prod host
 
 seed-dev: ## Create demo links through the dev host
 	BASE_URL=http://$(HOST_DEV) python3 scripts/seed_demo.py
+
+# --- EKS (stretch phase) ----------------------------------------------------
+# The same chart and the same GitOps machinery, on a real managed Kubernetes
+# cluster instead of kind. Terraform builds the cluster; Argo CD deploys the app
+# into it — the same split as everywhere else in this repo.
+#
+# Everything here costs money while it exists (~$0.24/hour: control plane, two
+# nodes, NAT gateway, NLB), so the intended cycle is apply, demo, destroy in one
+# sitting. Full runbook in docs/EKS.md.
+#
+#   make eks-up          # ~15-20 min: VPC, control plane, nodes, addons
+#   make eks-kubeconfig  # point kubectl at it
+#   make eks-ingress     # install ingress-nginx (its Service creates the NLB)
+#   make eks-bootstrap   # Argo CD + the EKS app-of-apps
+#   make eks-url         # the address to open
+#   make eks-down        # release the NLB, then destroy everything
+
+TF_DIR       := terraform
+EKS_INGRESS_VERSION := controller-v1.15.1
+# The AWS variant of the same pinned ingress-nginx release the kind cluster
+# vendors in k8s/ingress-nginx/. It differs in one important way: its Service is
+# type LoadBalancer with NLB annotations, instead of using host ports.
+EKS_INGRESS_MANIFEST := https://raw.githubusercontent.com/kubernetes/ingress-nginx/$(EKS_INGRESS_VERSION)/deploy/static/provider/aws/deploy.yaml
+
+eks-init: ## Initialize Terraform (downloads providers)
+	cd $(TF_DIR) && terraform init
+
+eks-plan: ## Preview what Terraform would create (no changes, no cost)
+	cd $(TF_DIR) && terraform plan
+
+eks-up: ## Create the EKS cluster with Terraform (~15-20 min, starts billing)
+	@echo "Creating the EKS cluster. The control plane alone takes 10-15 minutes."
+	@echo "This starts costing roughly \$$0.24/hour until 'make eks-down'."
+	cd $(TF_DIR) && terraform init -input=false && terraform apply
+
+eks-kubeconfig: ## Point kubectl at the EKS cluster
+	$$(cd $(TF_DIR) && terraform output -raw kubeconfig_command)
+	kubectl get nodes
+
+eks-ingress: ## Install ingress-nginx on EKS (its Service provisions the NLB)
+	kubectl apply -f $(EKS_INGRESS_MANIFEST)
+	kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=300s
+	@echo "Waiting for AWS to attach a load balancer to the controller Service..."
+	@kubectl -n ingress-nginx wait --for=jsonpath='{.status.loadBalancer.ingress}' \
+		svc/ingress-nginx-controller --timeout=300s \
+		|| echo "Still pending. If it never resolves, the subnet ELB tags are wrong — see docs/EKS.md."
+
+eks-bootstrap: ## Install Argo CD and bootstrap the EKS app-of-apps
+	$(MAKE) argocd-install
+	kubectl apply -f gitops/project.yaml
+	kubectl apply -f gitops/project-platform.yaml
+	kubectl apply -f gitops/eks/root-app-eks.yaml
+	@echo "Bootstrapped. Watch it converge:  kubectl -n argocd get applications -w"
+
+eks-url: ## Print the URL the app is reachable at (the NLB's DNS name)
+	@echo "http://$$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+		-o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+
+eks-status: ## Show the EKS release: pods, PVC (should be Bound), HPA, Argo apps
+	@echo "=== nodes ===" && kubectl get nodes -o wide
+	@echo "\n=== argo ===" && kubectl -n argocd get applications
+	@echo "\n=== release ===" && kubectl -n url-shortener-eks get pods,pvc,hpa
+
+eks-seed: ## Create demo links through the EKS load balancer
+	BASE_URL=$$($(MAKE) -s eks-url) python3 scripts/seed_demo.py
+
+# TEARDOWN ORDER MATTERS.
+#
+# The NLB was created by Kubernetes (the ingress-nginx Service), not by
+# Terraform — so Terraform doesn't know it exists. Destroying the VPC while a
+# load balancer still has ENIs in its subnets fails, and the usual outcome is a
+# half-destroyed stack plus an orphaned NLB quietly billing.
+#
+# So: delete the Service first, wait for AWS to actually release the balancer,
+# and only then destroy.
+eks-down: ## Release the NLB, then destroy all AWS resources
+	@echo "Deleting the ingress-nginx Service so AWS releases the NLB..."
+	-kubectl -n ingress-nginx delete svc ingress-nginx-controller --ignore-not-found --timeout=300s
+	@echo "Giving AWS time to tear the load balancer down before the VPC goes..."
+	@sleep 45
+	cd $(TF_DIR) && terraform destroy
+	@echo "\nDestroyed. Confirm nothing is left behind:"
+	@echo "  aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName'"
+	@echo "  aws ec2 describe-volumes --filters Name=status,Values=available --query 'Volumes[].VolumeId'"

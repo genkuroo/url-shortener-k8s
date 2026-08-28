@@ -1,0 +1,48 @@
+# storageclass.yaml — the default StorageClass for the EKS cluster.
+#
+# This is the piece kind gave away for free. kind bundles a local-path
+# provisioner and marks it default, so the chart's Postgres StatefulSet claims a
+# PVC and it binds without anyone thinking about it. EKS ships NO default
+# StorageClass with a working backend, so the same PVC would sit Pending forever
+# and the release would never go Healthy.
+#
+# Terraform installs the EBS CSI *driver* (terraform/addons.tf) and gives it AWS
+# permissions via IRSA. This object is the other half: the StorageClass that
+# actually asks that driver for volumes, marked default so the chart — which
+# deliberately does NOT name a storageClassName in its volumeClaimTemplates —
+# picks it up with no template change at all.
+#
+# It's delivered by Argo rather than Terraform on purpose, matching the split the
+# whole project uses: Terraform owns infrastructure, Argo owns everything inside
+# the cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: eks-storageclass
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave -2: earlier than metrics-server (-1) and well before the app (0), so
+    # the StorageClass exists before any PVC is created. A PVC created first
+    # would bind to nothing and need deleting by hand.
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  # StorageClass is cluster-scoped, which the tight `url-shortener` project
+  # deliberately doesn't allow — the `platform` project is the one with the
+  # broader permissions for cluster-level machinery.
+  project: platform
+
+  source:
+    repoURL: https://github.com/genkuroo/url-shortener-k8s.git
+    targetRevision: main
+    path: gitops/eks/manifests
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

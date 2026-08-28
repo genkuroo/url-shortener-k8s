@@ -1,0 +1,46 @@
+# root-app-eks.yaml — the app-of-apps root for the EKS cluster.
+#
+# WHY A SECOND ROOT AT ALL:
+#
+# Both clusters watch the SAME git repo. If the EKS cluster bootstrapped the
+# original gitops/root-app.yaml, it would faithfully deploy kind's desired state
+# into AWS — two releases on *.localtest.me hostnames (which resolve to
+# 127.0.0.1 and mean nothing there), a metrics-server carrying kind's
+# --kubelet-insecure-tls workaround, and the whole monitoring stack on a
+# two-node cluster.
+#
+# So the two clusters get two explicit desired states out of one repo:
+#
+#   gitops/apps/       -> kind    (applied by `make argocd-bootstrap`)
+#   gitops/eks/apps/   -> EKS     (applied by `make eks-bootstrap`)
+#
+# No branching, no ApplicationSet, no cluster-name templating — just two
+# directories, each obvious about what it deploys. The chart underneath is the
+# same one in both cases; only the values overlay differs.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: url-shortener-eks-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: url-shortener
+
+  source:
+    repoURL: https://github.com/genkuroo/url-shortener-k8s.git
+    targetRevision: main
+    path: gitops/eks/apps
+    directory:
+      recurse: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true

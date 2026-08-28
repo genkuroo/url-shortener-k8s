@@ -1,0 +1,90 @@
+# values-eks.yaml — the overlay for the EKS cluster (stretch phase).
+#
+# This file is the entire application-side cost of moving to real cloud. The
+# chart templates are the same ones kind runs; only these values differ. That's
+# the claim the EKS port exists to prove.
+#
+# Deployed by gitops/eks/apps/app.yaml into the url-shortener-eks namespace.
+# Note there is ONE release here, not the dev+prod pair kind runs — two releases
+# would mean two Postgres StatefulSets and two EBS volumes for no extra demo.
+
+app:
+  # A prod-shaped baseline, sized for a 2-node cluster rather than a laptop.
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Autoscaling stays ON — proving the HPA works against real EC2 CPU rather than
+# emulated laptop CPU is one of the more interesting things this cluster can
+# show. maxReplicas is lower than prod's 9 because the node group is only two
+# instances; past ~6 replicas pods would go Pending waiting for capacity that
+# nothing is provisioning (no Cluster Autoscaler is installed).
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 60
+
+postgres:
+  # Backed by a real gp3 EBS volume via the CSI driver. Note the chart does NOT
+  # name a storageClassName — it relies on the cluster default, which is exactly
+  # why gitops/eks/apps/storageclass.yaml marks gp3 as default. EBS has a 1 GiB
+  # floor and bills per provisioned GiB, so 4Gi costs pennies while the cluster
+  # is up and gives Postgres real room.
+  storage: 4Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ingress:
+  className: nginx
+  # Deliberately EMPTY.
+  #
+  # On kind the host is urlshortener.localtest.me, a domain that resolves to
+  # 127.0.0.1. In AWS the app is reached at the NLB's own generated DNS name,
+  # which isn't known until the Service is created — so there is nothing to write
+  # here ahead of time. An empty host renders a rule with no `host:` field, which
+  # matches ANY hostname, so the NLB name just works.
+  #
+  # Set this to a real name if you ever point a DNS record (e.g. a CNAME on
+  # gen-kuro.com) at the load balancer.
+  host: ""
+
+# --- Observability: off for now ----------------------------------------------
+# kube-prometheus-stack is not deployed on this cluster (there is no
+# monitoring.yaml in gitops/eks/apps/), so the ServiceMonitor and dashboard
+# ConfigMap would have no operator to consume them.
+#
+# TO TURN MONITORING ON, three things change together:
+#   1. flip both flags below to true
+#   2. add gitops/eks/apps/monitoring.yaml (copy gitops/apps/monitoring.yaml,
+#      drop retention to a few hours and give Prometheus a gp3 PVC)
+#   3. raise capacity in terraform.tfvars — node_desired_size = 3, or
+#      node_instance_type = "t4g.large". The stack wants ~2-3 GiB, and it is what
+#      pushed the 2 GiB Colima VM over its ceiling back in Phase 5.
+#
+# Even with the stack on, the control-plane scrape jobs (kube-scheduler,
+# kube-controller-manager, etcd, kube-proxy) stay disabled — on kind because they
+# bind to 127.0.0.1, on EKS because AWS runs the control plane and doesn't expose
+# them at all. Control-plane observability on EKS lives in CloudWatch instead:
+# see the cluster_log_types variable in terraform/variables.tf.
+serviceMonitor:
+  enabled: false
+dashboard:
+  enabled: false
+
+# Pinned to the same GHCR image CI publishes for kind. The arm64 half of this
+# multi-arch image is what lets the cluster run on Graviton (t4g) nodes.
+image:
+  repository: ghcr.io/genkuroo/url-shortener
+  tag: ba71052
+  pullPolicy: IfNotPresent

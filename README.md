@@ -231,5 +231,29 @@ pushed to GHCR under its commit SHA, and then written into `values-dev.yaml` and
 `kubectl`, so CI holds no cluster credentials. Prod is a deliberate manual
 promotion (`promote.yml`), not an automatic deploy.
 
-Remaining ideas are stretch only: EKS-ready Terraform, and
-sealed-secrets/external-secrets so the DB Secret isn't plaintext in git.
+## Also runs on EKS
+
+The stretch phase adds `terraform/` — a real **Amazon EKS** cluster that the same
+chart and the same Argo CD setup deploy to. Runbook: [`docs/EKS.md`](docs/EKS.md).
+
+The whole application-side cost of moving to managed Kubernetes on different
+hardware, in a different account, on a different CPU architecture is **one values
+file**. The app, the Dockerfile, the CI workflows and the chart templates are
+untouched — which is the point: "declarative and portable" had to be a real
+property, not a claim in a README.
+
+What Terraform has to supply that kind gave away for free: a VPC with the
+**ELB-discovery subnet tags** that LoadBalancer Services silently depend on, an
+**EBS CSI driver** (EKS ships no default StorageClass, so the database PVC would
+otherwise hang forever), and **IRSA** — an OIDC provider letting one named
+ServiceAccount assume one IAM role, rather than granting every pod on a node the
+right to create disks.
+
+The nodes are **Graviton (arm64)**, roughly 20% cheaper, which is only possible
+because CI publishes a multi-arch image — a change originally made to support an
+Apple Silicon laptop.
+
+Written and validated; applied on demand and destroyed after, like the sibling
+AWS projects (≈ $0.24/hour while up).
+
+Still open: sealed-secrets/external-secrets so the DB Secret isn't plaintext in git.

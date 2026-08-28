@@ -92,8 +92,34 @@ Argo CD reconciles from there.
   ingress (created a link, 307 redirect followed, click recorded in `/stats`), all
   five Applications Synced/Healthy. The rolling update kept the old pod serving
   throughout the failed-pull episode, so dev never went down.
-- Remaining work is **stretch only**: EKS-ready Terraform, and
-  sealed-secrets/external-secrets so the DB Secret isn't plaintext in git.
+- **EKS stretch phase — code written and validated, NOT yet applied** (2026-08-27).
+  `terraform/` stands up a real EKS cluster; `gitops/eks/` is a second app-of-apps
+  tree that deploys the same chart there. Runbook + gotchas: `docs/EKS.md`.
+  - **Two GitOps trees on purpose.** Both clusters watch the same repo, so EKS gets
+    `gitops/eks/apps/` (via `make eks-bootstrap`) while kind keeps `gitops/apps/`
+    (via `make argocd-bootstrap`). Without the split, EKS would deploy kind's
+    `*.localtest.me` hosts and kind's `--kubelet-insecure-tls` workaround.
+  - **Only one template changed:** `templates/ingress.yaml` now wraps `host:` in
+    `{{- with }}` so the EKS overlay can leave it empty (a host-less rule matches
+    the NLB's generated DNS name). Verified kind's dev/prod still render their
+    hosts identically.
+  - **No storage template change needed** — `volumeClaimTemplates` omits
+    `storageClassName`, so marking gp3 default (`gitops/eks/manifests/`) is enough.
+  - **IRSA** is the genuinely new concept vs. kind: an OIDC provider lets the
+    `ebs-csi-controller-sa` ServiceAccount assume one IAM role, instead of giving
+    the whole node group volume-creation rights.
+  - ⚠️ **`make eks-down`, never bare `terraform destroy`.** The NLB is created by
+    the ingress-nginx Service, not Terraform, so destroy fails on the VPC and can
+    leave an orphaned load balancer billing. The target deletes the Service first.
+  - **Monitoring is off** in the EKS overlay (kube-prometheus-stack is what melted
+    the 2 GiB Colima VM in Phase 5). metrics-server IS installed so the HPA works.
+    Turning it on = flip two flags + add `gitops/eks/apps/monitoring.yaml` + raise
+    `node_desired_size`. Note control-plane scrape jobs stay off on EKS too, but
+    because AWS doesn't expose those endpoints — CloudWatch (`cluster_log_types`)
+    is the EKS-native replacement.
+  - Costs ≈ **$0.24/hr** while up. Apply/demo/destroy in one sitting.
+- Remaining after that: sealed-secrets/external-secrets so the DB Secret isn't
+  plaintext in git.
 - Minor upkeep: Actions warns `actions/checkout@v4`, `azure/setup-helm@v4`, and the
   `docker/*` actions still target Node 20 (forced onto Node 24). Bump when convenient.
 

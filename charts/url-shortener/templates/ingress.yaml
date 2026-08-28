@@ -12,8 +12,7 @@ metadata:
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:
-    - host: {{ .Values.ingress.host }}
-      http:
+    - http:
         paths:
           # Everything under "/" goes to the app: UI at /, API under /api, short
           # links at /{code} — all one Service.
@@ -24,4 +23,12 @@ spec:
                 name: {{ include "url-shortener.fullname" . }}
                 port:
                   number: 80
+      {{- /* A rule with no `host:` matches ANY hostname. The kind overlays always
+             set one, because dev and prod share a controller and need separate
+             names. The EKS overlay leaves it empty: there the app is reached at
+             the load balancer's own generated DNS name, which isn't knowable
+             until the Service exists. */}}
+      {{- with .Values.ingress.host }}
+      host: {{ . }}
+      {{- end }}
 {{- end }}

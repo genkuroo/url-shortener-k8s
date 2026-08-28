@@ -1,0 +1,30 @@
+# The gp3 StorageClass, marked as the cluster default.
+#
+# Applied by the eks-storageclass Argo Application (gitops/eks/apps/).
+#
+# gp3 rather than gp2: it's the current-generation general-purpose EBS volume,
+# cheaper per GiB, and its baseline performance doesn't scale with volume size
+# the way gp2's does — so a small database volume isn't also a slow one.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    # THIS is the annotation that matters. The chart's volumeClaimTemplates omit
+    # storageClassName, so Kubernetes falls back to whichever class is marked
+    # default. Without this line the PVC has no class to use and stays Pending.
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+# WaitForFirstConsumer, not Immediate: an EBS volume lives in ONE availability
+# zone and can only attach to a node in that same zone. Binding late — after the
+# scheduler has picked a node — guarantees the volume is created in the right AZ.
+# Binding immediately can strand a volume in AZ "a" while the pod is scheduled
+# into AZ "b", and the pod then never starts.
+volumeBindingMode: WaitForFirstConsumer
+# Delete the EBS volume when the PVC is deleted. Right for a throwaway demo
+# cluster; Retain would leave volumes billing after `make eks-down`.
+reclaimPolicy: Delete
+allowVolumeExpansion: true

@@ -1,0 +1,41 @@
+# metrics-server for EKS.
+#
+# Nearly identical to gitops/apps/metrics-server.yaml — same upstream chart, same
+# pinned version — with one deliberate difference: NO --kubelet-insecure-tls.
+#
+# That flag exists in the kind version because kind's kubelets serve their
+# metrics endpoint with a self-signed cert the cluster CA didn't issue, so
+# metrics-server rejects them and every node reads "unavailable". EKS provisions
+# properly signed kubelet serving certificates, so the flag is unnecessary here —
+# and carrying a "skip TLS verification" workaround into a cloud cluster just
+# because it was needed locally is exactly the kind of thing worth not doing.
+#
+# It's still needed at all because EKS, like kind, ships no metrics API of its
+# own — and the app's HorizontalPodAutoscaler can't read CPU without one.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: eks-metrics-server
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Before the app (wave 0), so the metrics API is serving by the time the
+    # HPA appears and it reads real CPU instead of sitting at <unknown>.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: platform
+
+  source:
+    repoURL: https://kubernetes-sigs.github.io/metrics-server/
+    chart: metrics-server
+    targetRevision: 3.13.1
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
