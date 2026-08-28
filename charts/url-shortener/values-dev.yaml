@@ -17,5 +17,5 @@ serviceMonitor:
   enabled: true
 image:
   repository: ghcr.io/genkuroo/url-shortener
-  tag: c10845b
+  tag: b13d10f
   pullPolicy: IfNotPresent
