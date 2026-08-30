@@ -210,14 +210,31 @@ NLB quietly charging. `make eks-down` handles the ordering; don't run
 `terraform destroy` directly.
 
 **Your tools have architectures too, not just your app.** Phase 7 made the *app*
-image multi-arch, which is what lets it run on Graviton. But `make load-test` was
-still pulling `williamyeh/hey`, which publishes **linux/amd64 only** — a
-single-arch manifest with no manifest list. On an arm64 node the pod never starts:
-`no match for platform in manifest`, the exact Phase 7 error, from a completely
-different image. The load generator is now a multi-arch `alpine:3` pod running
-parallel busybox `wget` loops (`LOAD_IMAGE` in the Makefile), which works on kind
-and EKS alike. Worth remembering that every sidecar, init container, and debug
-image you reach for carries the same constraint as the app.
+image multi-arch. But `make load-test` still pulled `williamyeh/hey`, which
+publishes **linux/amd64 only** — a plain single-arch manifest, not an index.
+
+That target has always worked on kind, and the reason is worth understanding: the
+Colima VM registers `qemu-x86_64` in `/proc/sys/fs/binfmt_misc`, and binfmt_misc
+is a **kernel-global** facility, so kind's node containers inherit it and the
+amd64 binary runs under transparent QEMU emulation. Verified — the pod completes
+normally on the arm64 kind nodes.
+
+Two consequences:
+
+- **The failure would not look like Phase 7's.** `no match for platform in
+  manifest` comes from a manifest *index* containing no entry for your platform.
+  A single-arch manifest has nothing to match against, so it pulls happily on any
+  architecture and would instead fail later, at exec, with `exec format error`.
+- **A Graviton EC2 node has no such emulation layer**, so it is expected to fail
+  there. (Expected, not observed — the load generator was swapped to a multi-arch
+  image before load was ever run on EKS, so `hey` was never actually exercised on
+  Graviton.)
+
+The swap to a multi-arch `alpine:3` pod (`LOAD_IMAGE` in the Makefile) is still
+the right call, for a reason independent of whether `hey` would have run: a load
+test that silently depends on **laptop-only CPU emulation** is both unportable and
+measuring the wrong thing, since the emulated generator burns host CPU competing
+with the very workload it is trying to load.
 
 **Node sizing is the knob.** Pods going `Pending` means you're out of capacity,
 not out of luck. Raise `node_desired_size` or move to `t4g.large` in

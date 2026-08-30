@@ -106,15 +106,25 @@ Argo CD reconciles from there.
     default, matches the local kubectl). Check with
     `aws eks describe-cluster-versions` before any future apply — **pins rot**.
     Cheap to bump because every add-on is `addon_version = null`.
-  - ⚠️ **`make load-test` was broken on arm64 — everywhere, not just EKS.** It
-    pulled `williamyeh/hey`, which is published **linux/amd64 only**. Both kind
-    (Colima on Apple Silicon) and the EKS Graviton nodes are arm64, so the pod
-    can't start: `no match for platform in manifest` — the same Phase 7 error from
-    a different image. Replaced with a multi-arch `alpine:3` pod running parallel
-    busybox `wget` loops (`LOAD_IMAGE` + the `LOAD_SCRIPT` macro), shared by
-    `load-test` and the new `eks-load-test` / `eks-hpa-watch`. **Phase 7's
-    multi-arch lesson applied to the app image but was never applied to the
-    tooling images.**
+  - **`make load-test` depended on laptop-only CPU emulation.** It pulled
+    `williamyeh/hey`, which is published **linux/amd64 only** (a plain single-arch
+    manifest, not an index). It has always worked on kind — the Colima VM registers
+    `qemu-x86_64` in `/proc/sys/fs/binfmt_misc`, which is kernel-global, so the kind
+    node containers inherit it and the amd64 binary runs under transparent QEMU
+    emulation. Verified: the pod completes normally on the arm64 kind nodes, so
+    Phase 6's load test was genuinely fine.
+    - Note this failure would **not** look like Phase 7's. `no match for platform in
+      manifest` comes from a manifest *index* with no matching entry; a single-arch
+      manifest has nothing to match, so it pulls anywhere and fails later at exec.
+    - A Graviton EC2 node has no emulation layer, so it's **expected** to fail there
+      — expected, not observed: the generator was swapped to a multi-arch image
+      before load was run on EKS, so `hey` was never exercised on Graviton.
+    - Swapped to a multi-arch `alpine:3` pod running parallel busybox `wget` loops
+      (`LOAD_IMAGE` + the `LOAD_SCRIPT` macro), shared by `load-test` and the new
+      `eks-load-test` / `eks-hpa-watch`. Right call regardless: a load test that
+      silently relies on laptop-only emulation is unportable **and** measures the
+      wrong thing, since the emulated generator burns host CPU competing with the
+      workload it's loading.
   - Minor doc correction: EKS *does* ship a `gp2` StorageClass, but on the
     deprecated in-tree `kubernetes.io/aws-ebs` provisioner and **not** marked
     default — so the "no usable default StorageClass" premise still holds.
