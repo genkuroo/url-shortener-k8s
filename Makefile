@@ -29,6 +29,7 @@ IMAGE     := url-shortener:dev
 CHART     := charts/url-shortener
 NS_DEV    := url-shortener-dev
 NS_PROD   := url-shortener-prod
+NS_EKS    := url-shortener-eks
 HOST_DEV  := dev.urlshortener.localtest.me
 HOST_PROD := urlshortener.localtest.me
 
@@ -45,12 +46,36 @@ ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_V
         load-test hpa-watch \
         status logs port-forward seed seed-dev restart-app \
         eks-init eks-plan eks-up eks-kubeconfig eks-ingress eks-bootstrap \
-        eks-url eks-status eks-seed eks-down
+        eks-url eks-status eks-seed eks-load-test eks-hpa-watch eks-down
 
 # Load-test knobs (Phase 6). Override on the command line, e.g.
-#   make load-test LOAD_CONCURRENCY=200 LOAD_DURATION=6m
-LOAD_CONCURRENCY ?= 100
-LOAD_DURATION    ?= 4m
+#   make load-test LOAD_CONCURRENCY=80 LOAD_DURATION=600
+# LOAD_DURATION is in seconds (busybox `sleep` in the alpine pod takes no suffix).
+LOAD_CONCURRENCY ?= 40
+LOAD_DURATION    ?= 300
+
+# The load generator image.
+#
+# NOT williamyeh/hey, which this used to be. That image is published for
+# linux/amd64 ONLY (single-arch manifest, no manifest list) — and every node this
+# project runs on is arm64: kind on Colima (Apple Silicon) and the EKS Graviton
+# (t4g) node group alike. The pod fails to start with the same error the app
+# image hit in Phase 7: "no match for platform in manifest".
+#
+# alpine is an official multi-arch image, so a pod running parallel busybox wget
+# loops works unchanged on both clusters. It gives up hey's latency histogram,
+# but the job here is to generate CPU pressure and trip the HPA — and it removes
+# an architecture assumption rather than adding one.
+LOAD_IMAGE ?= alpine:3
+
+# Shell run inside that pod: fan out $(LOAD_CONCURRENCY) request loops, hold them
+# for $(LOAD_DURATION) seconds, then exit so `--rm` cleans the pod up.
+define LOAD_SCRIPT
+for i in $$(seq 1 $(LOAD_CONCURRENCY)); do \
+  (while true; do wget -q -O- $(1)/healthz >/dev/null 2>&1; done) & \
+done; \
+sleep $(LOAD_DURATION)
+endef
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -172,10 +197,18 @@ load-demo: ## Generate demo traffic against prod so the Grafana graphs move (Ctr
 # tool is needed and the load fans out across replicas as they scale.
 
 load-test: ## Fire load at prod from an in-cluster pod to trip the HPA (watch: make hpa-watch)
-	@echo "Firing $(LOAD_CONCURRENCY) concurrent clients at prod for $(LOAD_DURATION)."
+	@echo "Firing $(LOAD_CONCURRENCY) request loops at prod for $(LOAD_DURATION)s."
 	@echo "Run 'make hpa-watch' in another terminal to watch replicas scale out, then back in."
-	kubectl -n $(NS_PROD) run load-test --rm -i --restart=Never --image=williamyeh/hey -- \
-		-z $(LOAD_DURATION) -c $(LOAD_CONCURRENCY) http://prod-url-shortener/healthz
+	kubectl -n $(NS_PROD) run load-test --rm -i --restart=Never --image=$(LOAD_IMAGE) -- \
+		sh -c '$(call LOAD_SCRIPT,http://prod-url-shortener)'
+
+eks-load-test: ## Same load test, against the EKS release (watch: make eks-hpa-watch)
+	@echo "Firing $(LOAD_CONCURRENCY) request loops at the EKS release for $(LOAD_DURATION)s."
+	kubectl -n $(NS_EKS) run load-test --rm -i --restart=Never --image=$(LOAD_IMAGE) -- \
+		sh -c '$(call LOAD_SCRIPT,http://eks-url-shortener)'
+
+eks-hpa-watch: ## Watch the EKS HPA add/remove app replicas live
+	kubectl -n $(NS_EKS) get hpa,deployment -w
 
 hpa-watch: ## Watch the prod HPA add/remove app replicas live
 	@echo "Watching the prod HPA (Ctrl-C to stop). TARGETS jumps past 60% under load, then REPLICAS climb."

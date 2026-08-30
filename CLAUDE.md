@@ -50,7 +50,7 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-08-26)
+## Current state (as of 2026-08-30)
 
 **Phase 7 complete — CI/CD (GitHub Actions + GHCR), the final planned phase.**
 The delivery loop closes: push to `main` → `validate` (helm lint + kubeconform on
@@ -92,7 +92,33 @@ Argo CD reconciles from there.
   ingress (created a link, 307 redirect followed, click recorded in `/stats`), all
   five Applications Synced/Healthy. The rolling update kept the old pod serving
   throughout the failed-pull episode, so dev never went down.
-- **EKS stretch phase — code written and validated, NOT yet applied** (2026-08-27).
+- ✅ **EKS stretch phase — APPLIED AND VERIFIED 2026-08-30.** The cluster came up
+  clean on the first apply (29 resources, 0 errors) and the same chart kind runs
+  served traffic through an AWS NLB with zero template changes. Full results in
+  `docs/EKS.md` → "Verified run". Highlights: PVC **Bound** to gp3 (so EBS CSI +
+  IRSA + default StorageClass all correct), all 4 Argo apps Synced/Healthy, 307
+  redirect + click tracking through the NLB, HPA scaled **2→4→6** on real EC2 CPU.
+  - ⚠️ **`cluster_version` was pinned to 1.31, which is now a 6x cost trap.** 1.31
+    left EKS standard support on 2025-11-25, so applying as-written would have
+    billed the control plane at the **extended-support $0.60/hr instead of
+    $0.10/hr** — ~$0.74/hr all-in rather than $0.24. There is no error and no
+    warning; the apply just succeeds and costs more. Bumped to **1.36** (the EKS
+    default, matches the local kubectl). Check with
+    `aws eks describe-cluster-versions` before any future apply — **pins rot**.
+    Cheap to bump because every add-on is `addon_version = null`.
+  - ⚠️ **`make load-test` was broken on arm64 — everywhere, not just EKS.** It
+    pulled `williamyeh/hey`, which is published **linux/amd64 only**. Both kind
+    (Colima on Apple Silicon) and the EKS Graviton nodes are arm64, so the pod
+    can't start: `no match for platform in manifest` — the same Phase 7 error from
+    a different image. Replaced with a multi-arch `alpine:3` pod running parallel
+    busybox `wget` loops (`LOAD_IMAGE` + the `LOAD_SCRIPT` macro), shared by
+    `load-test` and the new `eks-load-test` / `eks-hpa-watch`. **Phase 7's
+    multi-arch lesson applied to the app image but was never applied to the
+    tooling images.**
+  - Minor doc correction: EKS *does* ship a `gp2` StorageClass, but on the
+    deprecated in-tree `kubernetes.io/aws-ebs` provisioner and **not** marked
+    default — so the "no usable default StorageClass" premise still holds.
+- **EKS stretch phase — original design notes** (2026-08-27).
   `terraform/` stands up a real EKS cluster; `gitops/eks/` is a second app-of-apps
   tree that deploys the same chart there. Runbook + gotchas: `docs/EKS.md`.
   - **Two GitOps trees on purpose.** Both clusters watch the same repo, so EKS gets

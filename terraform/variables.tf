@@ -16,10 +16,18 @@ variable "vpc_cidr" {
   default     = "10.20.0.0/16"
 }
 
+# Pick a version still in EKS *standard* support. Once a version falls out of it,
+# AWS keeps the cluster running but moves the control plane to the extended-support
+# rate: $0.60/hour instead of $0.10/hour. Same cluster, 6x the bill, and no error
+# to warn you — the apply just succeeds and costs more.
+#
+# Check before applying:
+#   aws eks describe-cluster-versions \
+#     --query 'clusterVersions[].{v:clusterVersion,eol:endOfStandardSupportDate}' --output table
 variable "cluster_version" {
-  description = "Kubernetes minor version for the EKS control plane."
+  description = "Kubernetes minor version for the EKS control plane. Keep this on a version still in standard support — an out-of-support version silently bills at the $0.60/hr extended-support rate instead of $0.10/hr."
   type        = string
-  default     = "1.31"
+  default     = "1.36"
 }
 
 # --- Node group sizing -------------------------------------------------------

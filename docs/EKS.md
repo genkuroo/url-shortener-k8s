@@ -80,6 +80,29 @@ make eks-seed        # demo links, so there's something to look at
 `eks-up` is slow and that's normal: the control plane alone takes 10–15 minutes,
 the node group another ~5.
 
+Load-test the EKS release with `make eks-load-test` (watch it with
+`make eks-hpa-watch`).
+
+### Verified run — 2026-08-30
+
+First real apply of this stack, on **Kubernetes 1.36** (bumped from the 1.31 the
+phase was written against — see [Cost](#cost)):
+
+- `terraform apply` — **29 added, 0 changed, 0 destroyed**, no errors
+- 2 nodes Ready on `v1.36.3-eks`, `aarch64` — Graviton confirmed
+- NLB attached on the first attempt (the subnet ELB tags are right)
+- **PVC `Bound`** to a 4Gi gp3 volume — EBS CSI + IRSA + default StorageClass
+- All 4 Argo Applications Synced/Healthy
+- App served through the NLB: create → **307** redirect → click recorded in stats
+- metrics-server healthy with **no `--kubelet-insecure-tls`**, as predicted
+- HPA scaled **2 → 4 → 6** under load (peak `456%/60%`), all 6 pods Running with
+  none Pending — which is exactly the ceiling `maxReplicas: 6` was chosen for
+- …then back down to **2** about 4.5 min after the load stopped. Scale-out is
+  immediate; scale-in waits out the HPA's default 300s stabilization window, so a
+  brief lull can't cause replica flapping. The full 2→6→2 cycle is the demo.
+
+Nothing in `charts/` changed to make any of that work.
+
 ### Verifying it actually worked
 
 ```bash
@@ -132,6 +155,22 @@ Approximate, `us-east-1`, while running:
 A four-hour session is about **$1**. The control plane bills whether or not a
 single pod runs on it, which is the whole reason `eks-down` exists.
 
+> ⚠️ **That $0.10 assumes a Kubernetes version still in standard support.** Once a
+> version ages out, AWS keeps the cluster running but silently moves it to the
+> **extended-support** rate of **$0.60/hour** — the same cluster, six times the
+> control-plane bill, with no warning at apply time. Check before you apply:
+>
+> ```bash
+> aws eks describe-cluster-versions \
+>   --query 'clusterVersions[].{v:clusterVersion,eol:endOfStandardSupportDate}' --output table
+> ```
+>
+> This bit us on 2026-08-30: `cluster_version` had been pinned to **1.31** when the
+> stretch phase was written, and 1.31 left standard support on 2025-11-25. Applying
+> as-written would have cost ~**$0.74/hr** instead of $0.24. Now pinned to **1.36**.
+> Since the add-ons are unpinned (`addon_version = null`, EKS picks the default for
+> whatever version the cluster is), bumping is a one-line change.
+
 Because it's cheap by the hour, **leave the cluster up while iterating** rather
 than destroying between attempts — a destroy/recreate cycle costs 25+ minutes of
 your time to save about six cents.
@@ -139,6 +178,11 @@ your time to save about six cents.
 ---
 
 ## Gotchas
+
+**A stale `cluster_version` costs money, not errors.** Terraform will happily
+create a cluster on an out-of-standard-support version; the only symptom is a 6x
+control-plane bill (see [Cost](#cost)). Re-check the supported list any time this
+stack has sat unapplied for a few months — pins rot faster than code does.
 
 **Subnet tags are load-bearing.** The AWS cloud provider finds subnets for a load
 balancer *only* by `kubernetes.io/role/elb` (public) and
@@ -164,6 +208,16 @@ idea it exists. Destroying the VPC while the balancer still has ENIs in its
 subnets fails, and the usual result is a half-destroyed stack plus an orphaned
 NLB quietly charging. `make eks-down` handles the ordering; don't run
 `terraform destroy` directly.
+
+**Your tools have architectures too, not just your app.** Phase 7 made the *app*
+image multi-arch, which is what lets it run on Graviton. But `make load-test` was
+still pulling `williamyeh/hey`, which publishes **linux/amd64 only** — a
+single-arch manifest with no manifest list. On an arm64 node the pod never starts:
+`no match for platform in manifest`, the exact Phase 7 error, from a completely
+different image. The load generator is now a multi-arch `alpine:3` pod running
+parallel busybox `wget` loops (`LOAD_IMAGE` in the Makefile), which works on kind
+and EKS alike. Worth remembering that every sidecar, init container, and debug
+image you reach for carries the same constraint as the app.
 
 **Node sizing is the knob.** Pods going `Pending` means you're out of capacity,
 not out of luck. Raise `node_desired_size` or move to `t4g.large` in
