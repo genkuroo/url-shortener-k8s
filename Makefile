@@ -30,6 +30,7 @@ CHART     := charts/url-shortener
 NS_DEV    := url-shortener-dev
 NS_PROD   := url-shortener-prod
 NS_EKS    := url-shortener-eks
+EKS_CLUSTER := url-shortener-k8s-eks
 HOST_DEV  := dev.urlshortener.localtest.me
 HOST_PROD := urlshortener.localtest.me
 
@@ -323,18 +324,41 @@ eks-seed: ## Create demo links through the EKS load balancer
 
 # TEARDOWN ORDER MATTERS.
 #
-# The NLB was created by Kubernetes (the ingress-nginx Service), not by
-# Terraform — so Terraform doesn't know it exists. Destroying the VPC while a
-# load balancer still has ENIs in its subnets fails, and the usual outcome is a
-# half-destroyed stack plus an orphaned NLB quietly billing.
+# Terraform only knows about resources Terraform created. Two AWS resources here
+# were created by KUBERNETES instead, and Terraform has no idea they exist:
 #
-# So: delete the Service first, wait for AWS to actually release the balancer,
-# and only then destroy.
-eks-down: ## Release the NLB, then destroy all AWS resources
-	@echo "Deleting the ingress-nginx Service so AWS releases the NLB..."
+#   1. The NLB      — created by the ingress-nginx Service (type: LoadBalancer).
+#                     Destroying the VPC while it still has ENIs in the subnets
+#                     fails, leaving a half-destroyed stack and a billing NLB.
+#   2. The EBS vol  — created by the EBS CSI driver for the Postgres PVC.
+#                     Destroying the cluster just orphans it: it survives in
+#                     `available` state, billing per provisioned GiB, forever.
+#                     (Found the hard way on 2026-08-30 — a 4Gi gp3 volume was
+#                     left behind by the first teardown.)
+#
+# Both have the same fix and the same lesson: anything Kubernetes provisioned in
+# AWS has to be deleted THROUGH Kubernetes, before Terraform tears the cluster
+# out from under it. Argo's auto-sync would recreate the workload, so its
+# Applications go first.
+eks-down: ## Release the K8s-created AWS resources, then destroy everything
+	@echo "1/4  Removing Argo Applications so self-heal can't recreate the workload..."
+	-kubectl -n argocd delete app url-shortener-eks-root eks eks-metrics-server eks-storageclass \
+		--ignore-not-found --timeout=180s
+	@echo "2/4  Deleting the release namespace so the CSI driver deletes the EBS volume..."
+	-kubectl delete namespace $(NS_EKS) --ignore-not-found --timeout=300s
+	@echo "3/4  Deleting the ingress-nginx Service so AWS releases the NLB..."
 	-kubectl -n ingress-nginx delete svc ingress-nginx-controller --ignore-not-found --timeout=300s
-	@echo "Giving AWS time to tear the load balancer down before the VPC goes..."
-	@sleep 45
+	@echo "     Polling AWS until both are actually gone (a fixed sleep is a guess)..."
+	@for i in $$(seq 1 40); do \
+		LB=$$(aws elbv2 describe-load-balancers --query 'length(LoadBalancers)' --output text 2>/dev/null || echo 1); \
+		VOL=$$(aws ec2 describe-volumes --filters Name=status,Values=available \
+			Name=tag:kubernetes.io/cluster/$(EKS_CLUSTER),Values=owned \
+			--query 'length(Volumes)' --output text 2>/dev/null || echo 1); \
+		echo "       load_balancers=$$LB orphaned_volumes=$$VOL"; \
+		[ "$$LB" = "0" ] && [ "$$VOL" = "0" ] && echo "     released." && break; \
+		sleep 15; \
+	done
+	@echo "4/4  terraform destroy"
 	cd $(TF_DIR) && terraform destroy
 	@echo "\nDestroyed. Confirm nothing is left behind:"
 	@echo "  aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName'"

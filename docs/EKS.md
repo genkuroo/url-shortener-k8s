@@ -128,8 +128,9 @@ is default. Three things at once.
 make eks-down
 ```
 
-This deletes the ingress-nginx Service **first**, waits for AWS to release the
-load balancer, and only then runs `terraform destroy`. Order matters — see below.
+This removes the Argo Applications, deletes the release namespace, deletes the
+ingress-nginx Service, **polls AWS until the load balancer and the EBS volume are
+actually gone**, and only then runs `terraform destroy`. Order matters — see below.
 
 Then confirm nothing survived:
 
@@ -202,12 +203,34 @@ only attach to a node in that AZ. Binding late — after the scheduler picks a n
 a volume in AZ *a* while the pod is scheduled into AZ *b*, and the pod never
 starts.
 
-**Teardown order, or you leak a billing load balancer.** The NLB is created by
-*Kubernetes* (the ingress-nginx Service), not by Terraform, so Terraform has no
-idea it exists. Destroying the VPC while the balancer still has ENIs in its
-subnets fails, and the usual result is a half-destroyed stack plus an orphaned
-NLB quietly charging. `make eks-down` handles the ordering; don't run
-`terraform destroy` directly.
+**Teardown order, or you leak billing resources. Two of them, not one.**
+Terraform only knows what Terraform created. Two AWS resources here are created
+by *Kubernetes*, so `terraform destroy` neither deletes them nor warns about them:
+
+- **The NLB**, created by the ingress-nginx Service. Destroying the VPC while it
+  still has ENIs in the subnets *fails*, leaving a half-destroyed stack plus an
+  orphaned balancer quietly charging. This one at least fails loudly.
+- **The Postgres EBS volume**, created by the EBS CSI driver for the PVC. This one
+  fails **silently**: destroy succeeds, and the volume simply survives in
+  `available` state, billing per provisioned GiB forever. Found exactly this way
+  on 2026-08-30 — the first teardown reported "29 destroyed" and looked perfectly
+  clean, while leaving a 4Gi gp3 volume behind. Only the explicit
+  `describe-volumes` check caught it.
+
+The general rule is the useful takeaway: **anything Kubernetes provisioned inside
+AWS must be deleted through Kubernetes, before Terraform tears the cluster out
+from under it.** `make eks-down` now removes the Argo Applications first (so
+auto-sync can't recreate the workload), deletes the release namespace so the CSI
+driver releases the volume, deletes the ingress Service, and polls AWS until both
+resources are really gone. Don't run `terraform destroy` directly.
+
+A destroy that reports "29 destroyed, 0 errors" is not proof your account is
+clean. Always finish with:
+
+```bash
+aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName'
+aws ec2 describe-volumes --filters Name=status,Values=available --query 'Volumes[].VolumeId'
+```
 
 **Your tools have architectures too, not just your app.** Phase 7 made the *app*
 image multi-arch. But `make load-test` still pulled `williamyeh/hey`, which
