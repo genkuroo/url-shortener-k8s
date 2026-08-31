@@ -253,17 +253,28 @@ seal-password: ## Rotate + seal a DB password. Usage: make seal-password RELEASE
 # Two ways out: re-seal everything against the new key, or restore the old key
 # first. Restoring is the operationally sane one, and it's what makes the sealed
 # values in git portable to the EKS cluster too.
-seal-key-backup: ## Back up the controller's PRIVATE key (gitignored — store it somewhere real)
+# The key lives OUTSIDE the repo, at a fixed path both targets agree on. Keeping
+# it in the working tree relied on .gitignore staying right forever, and a stray
+# `git add -f`, an rsync, or a zip of the project directory would carry it along.
+# Override with SEAL_KEY=/some/other/path.
+SEAL_KEY ?= $(HOME)/.config/sealed-secrets/url-shortener-k8s-key.yaml
+
+seal-key-backup: ## Back up the controller's PRIVATE key to $(SEAL_KEY), mode 0600
+	@mkdir -p $(dir $(SEAL_KEY))
+	@chmod 700 $(dir $(SEAL_KEY))
 	kubectl -n kube-system get secret \
 		-l sealedsecrets.bitnami.com/sealed-secrets-key -o yaml \
-		> sealed-secrets-key-backup.yaml
-	@echo "Wrote sealed-secrets-key-backup.yaml (gitignored)."
-	@echo "This single file decrypts every SealedSecret in this repo. Treat it like"
-	@echo "the password itself: a password manager, not this directory, not git."
+		> $(SEAL_KEY)
+	@chmod 600 $(SEAL_KEY)
+	@echo "Wrote $(SEAL_KEY) (mode 0600, outside the repo)."
+	@echo ""
+	@echo "This single file decrypts every SealedSecret in this repo. A file on one"
+	@echo "laptop is a backup of nothing - copy it into a password manager too."
 
-seal-key-restore: ## Restore a backed-up sealing key into a fresh cluster, then restart the controller
-	@test -f sealed-secrets-key-backup.yaml || (echo "sealed-secrets-key-backup.yaml not found — run seal-key-backup on the old cluster first"; exit 1)
-	kubectl apply -f sealed-secrets-key-backup.yaml
+seal-key-restore: ## Restore the sealing key from $(SEAL_KEY) into a fresh cluster
+	@test -f $(SEAL_KEY) || (echo "No key at $(SEAL_KEY) - run seal-key-backup on the cluster that owns it, or pass SEAL_KEY=<path>"; exit 1)
+	kubectl apply -f $(SEAL_KEY)
+	@# The controller reads keys at startup, so it must restart to see this one.
 	kubectl -n kube-system delete pod -l name=sealed-secrets-controller --ignore-not-found
 	@echo "Key restored and controller restarted; it picks up existing keys on boot."
 

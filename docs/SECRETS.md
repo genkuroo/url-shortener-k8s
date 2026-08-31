@@ -80,9 +80,20 @@ make seal-key-backup     # once, on the cluster that owns the key
 make seal-key-restore    # on the new cluster, BEFORE the app syncs
 ```
 
-`sealed-secrets-key*.yaml` is gitignored. **That one file decrypts every
-SealedSecret in this repo** — it belongs in a password manager, not in this
-directory and never in git.
+The key is written **outside the repo**, to
+`~/.config/sealed-secrets/url-shortener-k8s-key.yaml` (mode `0600`, in a `0700`
+directory). Override with `SEAL_KEY=<path>`.
+
+It deliberately doesn't live in the working tree. Keeping it there would rest on
+`.gitignore` staying correct forever, and a stray `git add -f`, an rsync, or
+zipping up the project directory would carry it along anyway. The gitignore entry
+is still there as a second line of defence.
+
+**That one file decrypts every SealedSecret in this repo.** A file on a single
+laptop is a backup of nothing — copy it into a password manager too. Lose it *and*
+the cluster, and every `encryptedPassword` in git is unrecoverable: you'd re-seal
+all three environments from scratch, and rotate the database passwords again,
+because nothing can read the old ciphertext.
 
 ---
 
