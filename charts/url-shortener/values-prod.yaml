@@ -48,3 +48,19 @@ image:
   repository: ghcr.io/genkuroo/url-shortener
   tag: ba71052
   pullPolicy: IfNotPresent
+
+# --- Sealed database password -------------------------------------------------
+# The real prod password, encrypted with the sealed-secrets controller's public
+# key. Safe to commit: only the controller's private key — which never leaves the
+# cluster — can decrypt it.
+#
+# Sealed for namespace url-shortener-prod and secret name prod-url-shortener-secret
+# specifically (the default `strict` scope), so this string will NOT decrypt in
+# any other namespace or under any other name. Regenerate with:
+#
+#   make seal-password RELEASE=prod NAMESPACE=url-shortener-prod
+#
+# See docs/SECRETS.md for rotation and for what to do when the cluster is rebuilt.
+sealedSecret:
+  enabled: true
+  encryptedPassword: "AgAP0FAzbv865qxQ1+HUn6uTt5yYFqbgi5GFlk7/SZwRigLHA69WOLEHrrU0nkZS3tDy+QeM2BOzV0Q+etV9CEHYiz9R1R0wiNhIP4cO9+x6pObpX9dnj6EhpanMZUsPljLbmZDRcFJMqiUhnP9R87Vw7txApoh5HClAKo1yz+UbrNivREwmEPPwgESLirlqd4paTIWKK/bjGYTnZbIDlgqmiUKzoafq6m6R6RGnFeVhzl7yETQz/vl3AW7505BiXSTOIkpmz0QQEMPq+5twA1Vz+2umt/wcuPiQHMEzSPXiEdfG1wC6VK7FsQc+wVHY+jVRM+QtLdV3JsW8qbUAANhtnWULer5hT/4MCk29nCVuaSpA/Zf797ZCBJZVvkdzgf+N3w3icVE0NwSU4Dz1PlA1vpnSqqUUkvVNvai6E6Hdb2IKPeWYf0NQccVZ0VbBSOBdnjHjcjKqNy2wj79c/JhfhxaEl/O80NqRuDvp5S23NFxSwQ/akczLzP4No9TJanHhvT/WxtavJ+33RMlgFDXTA6PhgF/Qhu9UMliKNt3x6bPx3L/dQOudTXBlP8a85gyjHTodqFwFA4lZTxDk3hdFl3UHvYWXY1CdwLGsq/dG7SpM3zGcQ0J+m0u4fa56IWEbltP9ek4g2Oy1u24CuNFgIjG/yh+esulJnTSG+pFIXXicbD9tNe0ct5LJe7l5xv5owZmohDx5WW3dbhQzMFPUXox+mmQT8GbDp4thI1ez5A=="

@@ -19,7 +19,16 @@ data:
   POSTGRES_PORT: {{ .Values.config.postgresPort | quote }}
   POSTGRES_DB: {{ .Values.config.postgresDb }}
   POSTGRES_USER: {{ .Values.config.postgresUser }}
+{{- if not .Values.sealedSecret.enabled }}
 ---
+# The plaintext path. Only rendered when sealedSecret.enabled is false — where a
+# SealedSecret is in use, the controller creates this Secret instead (see
+# templates/sealedsecret.yaml) and rendering it here too would give the object two
+# owners fighting over its contents.
+#
+# Kept for `helm template` without a cluster, and for anyone running the chart on
+# a cluster that has no sealed-secrets controller. The value it reads is the
+# throwaway default in values.yaml, never a real credential.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -31,3 +40,4 @@ stringData:
   # stringData: written plaintext here, base64-encoded by Kubernetes on the way
   # in. Local-dev password only (see values.yaml).
   POSTGRES_PASSWORD: {{ .Values.secret.postgresPassword | quote }}
+{{- end }}

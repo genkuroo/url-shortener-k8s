@@ -88,3 +88,29 @@ image:
   repository: ghcr.io/genkuroo/url-shortener
   tag: ba71052
   pullPolicy: IfNotPresent
+
+# --- Sealed database password -------------------------------------------------
+# Sealed OFFLINE, against only the controller's public certificate — no cluster
+# was contacted to produce this, which is exactly how you'd seal a value in CI
+# where no kubeconfig exists.
+#
+# ONE PREREQUISITE, and it is easy to get wrong: SealedSecrets are encrypted to a
+# specific cluster's KEYPAIR. A freshly created EKS cluster generates a brand new
+# key, and this ciphertext would be undecryptable garbage to it — the controller
+# would log a decryption error and the app would sit waiting for a Secret that
+# never appears.
+#
+# So the EKS bootstrap must restore the kind cluster's sealing key first:
+#
+#   make seal-key-backup    # once, on the cluster that owns the key
+#   make eks-bootstrap
+#   make seal-key-restore   # before the app syncs
+#
+# Sealed for namespace url-shortener-eks and secret name eks-url-shortener-secret.
+#
+# Unlike dev/prod, no password rotation is needed on EKS: that cluster gets a new
+# EBS volume every session, so Postgres runs initdb fresh and simply adopts
+# whatever password this Secret carries.
+sealedSecret:
+  enabled: true
+  encryptedPassword: "AgAOhY30+JZeBuGh9BYfbMR+U2K3cIZsWx6x/1b3UziWsv0spC7twJDnWBdbhbb804Bg7a5ADi2T+6k4998RyOAB1NPoFJ5+KJ2NC6DK0JqQ4aPoUS4g4aodorN04RwDb5bRWqlrf8RjMVkSgloItWEEzpAkj4mGt+ETsZRbE7VNT06DdZ9w+MDykSWwf38ocn1JzE97046oWHBv8a1QbXH+dIDmaDz0RoHHGez6MqsBj6kCTSIUp5rUw2ccnSfnxGyCugLGPHTMVPBOrUBMlthd4aNyRGpsLqMjy5xcJNHJp2cPo2wq04/YW3d3DbYKlXubS7PKglexCPPiSU/qCW/igubI6jJNMezWydcxIO5UOU6XPl9s9+4c9Cab5fMnTLQ9XO2MbcWo2SDIdRGzn38e1rOBUXxrBvQ4K9ynI2s+v9yrGL9SRA73oAoz2AE79gHi1lpY+6ytGI9y6DUBvzRSmqXpAoFJ+fpftscu31z39/ZfWsJG23s857XSpqutzB2j2HF46E4pJGDPllkarg79CAbImEDgjAHcvBdeTum0EW2GwptdANdkh6vkHZvfL1t4QNFZneBwSniCu3TMa9ldVOVx0DexyvIXZzPaS+bB0mSopQ6v7OujwpyEgoeknOUP6w/Ii2q4lO2kR4LKIbt1fmC83Xb5feDxSIbU4CLJgWPLnmiKqBZvE6vQRrw1bvXtEyUXL4jvmF0mm+10aooI+sjCajchxPxDHKtFPRiR0A=="

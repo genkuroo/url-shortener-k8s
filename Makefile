@@ -45,6 +45,7 @@ ARGOCD_MANIFEST := https://raw.githubusercontent.com/argoproj/argo-cd/$(ARGOCD_V
         argocd-install argocd-bootstrap argocd-password argocd-ui gitops-up \
         grafana-ui prometheus-ui load-demo \
         load-test hpa-watch \
+        seal-password seal-key-backup seal-key-restore \
         status logs port-forward seed seed-dev restart-app \
         eks-init eks-plan eks-up eks-kubeconfig eks-ingress eks-bootstrap \
         eks-url eks-status eks-seed eks-load-test eks-hpa-watch eks-down
@@ -210,6 +211,61 @@ eks-load-test: ## Same load test, against the EKS release (watch: make eks-hpa-w
 
 eks-hpa-watch: ## Watch the EKS HPA add/remove app replicas live
 	kubectl -n $(NS_EKS) get hpa,deployment -w
+
+# --- Sealed Secrets (Phase 8) ------------------------------------------------
+# The DB password used to sit in values.yaml in plaintext, in a public repo. Now
+# each environment overlay carries CIPHERTEXT, and the in-cluster controller
+# decrypts it into a real Secret. Git stays the source of truth for everything,
+# including the one thing that previously couldn't be written down.
+
+seal-password: ## Rotate + seal a DB password. Usage: make seal-password RELEASE=dev NAMESPACE=url-shortener-dev
+	@test -n "$(RELEASE)"   || (echo "RELEASE is required, e.g. RELEASE=dev";     exit 1)
+	@test -n "$(NAMESPACE)" || (echo "NAMESPACE is required, e.g. NAMESPACE=url-shortener-dev"; exit 1)
+	@command -v kubeseal >/dev/null || (echo "kubeseal not found: brew install kubeseal"; exit 1)
+	@# Alphanumeric on purpose. The password is interpolated into a
+	@# postgresql://user:PASS@host/db URL, so a '/', '+' or '@' from raw base64
+	@# would silently corrupt the connection string.
+	@PW=$$(python3 -c "import secrets,string; a=string.ascii_letters+string.digits; print(''.join(secrets.choice(a) for _ in range(32)))"); \
+	echo "Rotating the password inside Postgres first — changing the Secret alone"; \
+	echo "does nothing to an initialized database (initdb reads it once, at creation)."; \
+	kubectl -n $(NAMESPACE) exec $(RELEASE)-url-shortener-postgres-0 -- \
+		psql -U appuser -d urlshortener -c "ALTER USER appuser PASSWORD '$$PW';" >/dev/null; \
+	echo "Sealing for namespace=$(NAMESPACE) name=$(RELEASE)-url-shortener-secret ..."; \
+	CT=$$(printf '%s' "$$PW" | kubeseal --raw --from-file=/dev/stdin \
+		--namespace $(NAMESPACE) --name $(RELEASE)-url-shortener-secret \
+		--controller-namespace kube-system --controller-name sealed-secrets-controller); \
+	echo ""; \
+	echo "Paste into charts/url-shortener/values-$(RELEASE).yaml:"; \
+	echo ""; \
+	echo "sealedSecret:"; \
+	echo "  enabled: true"; \
+	echo "  encryptedPassword: \"$$CT\""; \
+	echo ""; \
+	echo "Then commit + push. Argo re-syncs and the controller unseals it."; \
+	echo "Finally restart the app so it picks up the new Secret:"; \
+	echo "  kubectl -n $(NAMESPACE) rollout restart deploy/$(RELEASE)-url-shortener"
+
+# THE THING THAT BITES PEOPLE: SealedSecrets are encrypted to ONE cluster's
+# keypair. Delete the cluster (or `kind delete` and rebuild) and a fresh
+# controller generates a fresh key — at which point every encryptedPassword in
+# this repo is undecryptable ciphertext and the app never starts.
+#
+# Two ways out: re-seal everything against the new key, or restore the old key
+# first. Restoring is the operationally sane one, and it's what makes the sealed
+# values in git portable to the EKS cluster too.
+seal-key-backup: ## Back up the controller's PRIVATE key (gitignored — store it somewhere real)
+	kubectl -n kube-system get secret \
+		-l sealedsecrets.bitnami.com/sealed-secrets-key -o yaml \
+		> sealed-secrets-key-backup.yaml
+	@echo "Wrote sealed-secrets-key-backup.yaml (gitignored)."
+	@echo "This single file decrypts every SealedSecret in this repo. Treat it like"
+	@echo "the password itself: a password manager, not this directory, not git."
+
+seal-key-restore: ## Restore a backed-up sealing key into a fresh cluster, then restart the controller
+	@test -f sealed-secrets-key-backup.yaml || (echo "sealed-secrets-key-backup.yaml not found — run seal-key-backup on the old cluster first"; exit 1)
+	kubectl apply -f sealed-secrets-key-backup.yaml
+	kubectl -n kube-system delete pod -l name=sealed-secrets-controller --ignore-not-found
+	@echo "Key restored and controller restarted; it picks up existing keys on boot."
 
 hpa-watch: ## Watch the prod HPA add/remove app replicas live
 	@echo "Watching the prod HPA (Ctrl-C to stop). TARGETS jumps past 60% under load, then REPLICAS climb."

@@ -25,3 +25,8 @@ crash.*.log
 
 # OS
 .DS_Store
+
+# Sealed Secrets — the controller's PRIVATE key (make seal-key-backup).
+# This is the one file that can decrypt every SealedSecret in this repo. It must
+# never be committed; back it up somewhere real (a password manager), not here.
+sealed-secrets-key*.yaml

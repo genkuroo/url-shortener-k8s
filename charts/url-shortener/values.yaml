@@ -58,11 +58,27 @@ config:
   postgresUser: appuser
   postgresPort: "5432"
 
-# The one sensitive value. Plaintext here is fine ONLY because this is a
-# throwaway local-dev password; the stretch phase moves it to sealed-secrets so
-# nothing sensitive sits in git. Never put a real password here.
+# The plaintext fallback, used only when sealedSecret.enabled is false below.
+#
+# This is a throwaway value for `helm template` and for clusters with no
+# sealed-secrets controller. It is NOT the password dev or prod actually run on —
+# both of those come from a SealedSecret now. Never put a real password here: this
+# file is in a public repo, and anything committed here is public forever, even if
+# a later commit removes it.
 secret:
   postgresPassword: localdevpw
+
+# --- Sealed Secrets ----------------------------------------------------------
+# Off by default so the chart still renders standalone. Each environment overlay
+# turns it on and supplies its own ciphertext.
+#
+# encryptedPassword holds the output of `kubeseal` for THIS release's namespace
+# and secret name — see templates/sealedsecret.yaml for why it can't be shared
+# between environments, and docs/SECRETS.md for how to generate or rotate one
+# (`make seal-password`).
+sealedSecret:
+  enabled: false
+  encryptedPassword: ""
 
 ingress:
   enabled: true

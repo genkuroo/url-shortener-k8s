@@ -19,3 +19,19 @@ image:
   repository: ghcr.io/genkuroo/url-shortener
   tag: 3aa30d9
   pullPolicy: IfNotPresent
+
+# --- Sealed database password -------------------------------------------------
+# The real dev password, encrypted with the sealed-secrets controller's public
+# key. Safe to commit: only the controller's private key — which never leaves the
+# cluster — can decrypt it.
+#
+# Sealed for namespace url-shortener-dev and secret name dev-url-shortener-secret
+# specifically (the default `strict` scope), so this string will NOT decrypt in
+# any other namespace or under any other name. Regenerate with:
+#
+#   make seal-password RELEASE=dev NAMESPACE=url-shortener-dev
+#
+# See docs/SECRETS.md for rotation and for what to do when the cluster is rebuilt.
+sealedSecret:
+  enabled: true
+  encryptedPassword: "AgAE6gaMAWNDgkRJtBp1cyahfHE+Rg80DiGThs9THr1zgrtKx0eCObCgnKqQ7KBOv8KWZRlfNNwxnBV3dUxdJks/TFa4GeWYFnQ+OQ/UWfj8YzFmIYzeY0b8eeDAsHzgv/Y/J35k2volvtfM9dnu1Gu/dLkv1GNjxIYgl69R4/57mEZi5dptH0OumqRxYXOFoxfAISzHwevqt19gjbi6ChnweLYdOjKtTpiLTRL8eAhIciiLfFSRgeh1iiCBWyriHSLNZsTL+g03ipQYNZHCfA6Wk1aztbJjB1eUXJyMQkczCNKk21xILtsHqpIWtBQ71Jpn4sAerBNj4uhYjOGrIhhO/9t2tVXk4wqDQLVPqhO5Y6+PPkXlxm8sFkLhHtd2wdHC3TVVynC77EE2QxguLvc9XXt0KBVwC5AstbWuCv6ftYg7+xA5DaA2cOrX6hrd0haZ8iUHR8v5J411CDm778PR7eTdMx0THdXaVVAp6lgHedGrSQTezL6G53g9ZSFmJnJzeAPumiDK1WfSqWrx3zElYW1FuKQrvCfsT6VRg6u7ZFsAgsc77J7OzlGNlOyoT3n3FrHa+v/hHYDSZaroUEeOc7vJnCibJ0XnCeLTgSxQyHBfv+ZfYzTbEnpGfu4IvWiXvjAzimKHhiTSp80aoBfzuh0lP9mALzRlgapbepUd+uDrNRsGsE8Qfur975EzHMddh0QjpgscjwM1Zr2R4iafwcfKGrb/6KnzioF4Gd6W4A=="
