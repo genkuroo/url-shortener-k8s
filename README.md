@@ -23,8 +23,9 @@ myself."* Same Docker image — but now I own the scheduler.
 ## Stack
 
 **kind** (local Kubernetes, $0) · **Helm** · **Argo CD** (GitOps) · **Prometheus +
-Grafana** · **Horizontal Pod Autoscaler** · **ingress-nginx** · **GitHub Actions →
-GHCR**. App inside the container: **Python + FastAPI** talking to **Postgres**.
+Grafana** · **Horizontal Pod Autoscaler** · **ingress-nginx** · **Sealed Secrets** ·
+**GitHub Actions → GHCR**. App inside the container: **Python + FastAPI** talking
+to **Postgres**.
 
 ## Run it (on a local Kubernetes cluster)
 
@@ -224,12 +225,54 @@ docker compose down
 ## Build status
 
 Built phase-by-phase; see [`docs/PLAN.md`](docs/PLAN.md) for the full arc.
-**All seven planned phases are complete**, through Phase 7 (CI/CD): a push to
+**All seven planned phases are complete, plus both stretch phases** — EKS
+(applied and verified on real AWS) and Sealed Secrets. Through Phase 7 (CI/CD): a push to
 `main` is validated (`helm lint` + `kubeconform` on both env overlays), built and
 pushed to GHCR under its commit SHA, and then written into `values-dev.yaml` and
 **committed back to git** — where Argo CD picks it up. The pipeline never runs
 `kubectl`, so CI holds no cluster credentials. Prod is a deliberate manual
 promotion (`promote.yml`), not an automatic deploy.
+
+## Secrets: the password lives in the repo, encrypted
+
+Every other piece of desired state here is safe to publish. The database password
+wasn't, and it sat in `values.yaml` in the clear — the awkward corner of GitOps,
+where *git is the source of truth* except for the parts you can't write down.
+
+**Sealed Secrets** closes it. The controller keeps an RSA private key in the
+cluster; `kubeseal` encrypts with the public half, and what gets committed is
+ciphertext:
+
+```yaml
+sealedSecret:
+  enabled: true
+  encryptedPassword: "AgAE6gaMAWNDgkRJtBp1cyahfHE+Rg80DiGThs9THr1z..."
+```
+
+The cluster **pulls that from git and unseals it itself** — the Phase 4 pull model
+finally covering the one thing that used to need hands. Nothing that consumes the
+secret changed: the app and Postgres still read a `Secret` through `secretKeyRef`
+and neither knows a controller created it instead of Helm.
+
+Two things worth knowing, both of which cause confusing failures:
+
+- **Ciphertext is bound to a namespace *and* a name.** Dev's sealed value will not
+  decrypt as prod's — verified by trying it, which fails with `no key could
+  decrypt secret`. So each overlay carries its own.
+- **It's also bound to one cluster's keypair.** Rebuild the cluster and every
+  encrypted value in the repo becomes garbage; the `SealedSecret` exists, no
+  `Secret` ever appears, and the app waits forever for something that isn't
+  coming. Hence `make seal-key-backup` / `make seal-key-restore`.
+
+The old password was **rotated, not just hidden**: `localdevpw` had been in a
+public repo's history for weeks, so encrypting it going forward would have
+protected nothing. Rotating surfaced a detail that trips people up — changing
+`POSTGRES_PASSWORD` in a manifest does nothing to an existing database, because
+`initdb` reads it exactly once at creation. `make seal-password` handles the real
+sequence: `ALTER USER` in Postgres, then seal, then restart.
+
+Full runbook, including what this deliberately does *not* protect against:
+[`docs/SECRETS.md`](docs/SECRETS.md).
 
 ## Also runs on EKS
 

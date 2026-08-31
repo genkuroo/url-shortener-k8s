@@ -50,7 +50,7 @@ sessions. A stretch phase adds EKS-ready Terraform for an on-demand cloud deploy
 - The `DATABASE_URL` value lives in a Kubernetes Secret. Do not commit real
   secret values; a stretch phase adds sealed-secrets/external-secrets.
 
-## Current state (as of 2026-08-30)
+## Current state (as of 2026-08-31)
 
 **Phase 7 complete — CI/CD (GitHub Actions + GHCR), the final planned phase.**
 The delivery loop closes: push to `main` → `validate` (helm lint + kubeconform on
@@ -92,6 +92,50 @@ Argo CD reconciles from there.
   ingress (created a link, 307 redirect followed, click recorded in `/stats`), all
   five Applications Synced/Healthy. The rolling update kept the old pod serving
   throughout the failed-pull episode, so dev never went down.
+**Phase 8 (stretch) complete — Sealed Secrets.** The DB password is no longer
+plaintext in a public repo. Runbook: `docs/SECRETS.md`.
+
+- **Controller is vendored, not Helm-installed.** `k8s/sealed-secrets/controller.yaml`
+  pinned **v0.39.1**, deployed by `gitops/apps/sealed-secrets.yaml` under the existing
+  `platform` project (which already allowed this repo, `kube-system`, and cluster-scoped
+  kinds — no project change needed), `sync-wave: "-2"` so the controller exists before
+  any SealedSecret syncs. Vendored because the chart repo at
+  `bitnami-labs.github.io/sealed-secrets` now **404s** (chart moved to OCI under
+  Bitnami's reorg), and because committing the exact bytes is the right call for a
+  component holding a decryption key. Pinned to match the `kubeseal` CLI — they share
+  a crypto format.
+- **Chart 0.4.0.** `templates/sealedsecret.yaml` renders when `sealedSecret.enabled`;
+  `templates/config.yaml` renders the plaintext Secret only when it's **off** (both at
+  once = two owners fighting over the object). **No consumer changed** — app.yaml and
+  postgres.yaml still read `<fullname>-secret` via `secretKeyRef`.
+- ⚠️ **Two scopes, both cause confusing failures.** (1) Ciphertext binds to
+  **namespace + name** (default `strict`), so every overlay needs its own value —
+  verified by applying dev's ciphertext in another namespace: `no key could decrypt
+  secret`. (2) Ciphertext binds to **one cluster's keypair** — rebuild the cluster and
+  every value here is garbage; the SealedSecret exists, no Secret appears, the app
+  hangs in `CreateContainerConfigError`, and the only clue is the controller log.
+  Hence `make seal-key-backup` / `make seal-key-restore`; `sealed-secrets-key*.yaml`
+  is gitignored.
+- ⚠️ **Rotated, not just hidden.** `localdevpw` was public for weeks, so it's burned;
+  encrypting it going forward would protect nothing. dev + prod got fresh 32-char
+  passwords. **Alphanumeric on purpose** — the value is interpolated into a
+  `postgresql://user:PASS@host/db` URL, where `/`, `+` or `@` from raw base64 silently
+  corrupts the connection string.
+- ⚠️ **Two things that look automatic and aren't.** Changing `POSTGRES_PASSWORD` in a
+  manifest does **nothing** to an initialized database (`initdb` reads it once, at
+  creation) — you need `ALTER USER`. And updating a Secret does **not** restart pods
+  that consume it (env is injected at pod start) — you need `rollout restart`.
+  `make seal-password` does the whole sequence in the right order.
+- **`values-eks.yaml` was sealed OFFLINE** against just the public cert (`--cert`), no
+  cluster contacted — the CI pattern. EKS therefore needs `make seal-key-restore` during
+  bootstrap; no rotation needed there since it gets a fresh EBS volume and runs initdb.
+- **Verified 2026-08-31:** both envs unsealed to the exact rotated passwords, Secret
+  owned by the SealedSecret (so it GCs), app authenticated through the ingress on both
+  hosts (create → 307 → click recorded), and the **pre-existing rows survived** (10 dev
+  / 11 prod) — the Postgres pods were never restarted. `helm lint` clean; kubeconform
+  8/8 dev, 10/10 prod, **0 skipped** (the SealedSecret validated against the fetched CRD
+  schema).
+
 - ✅ **EKS stretch phase — APPLIED AND VERIFIED 2026-08-30.** The cluster came up
   clean on the first apply (29 resources, 0 errors) and the same chart kind runs
   served traffic through an AWS NLB with zero template changes. Full results in

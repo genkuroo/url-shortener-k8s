@@ -244,6 +244,19 @@ about $1. See the verification checklist in `docs/EKS.md`.
 smoke test kind gets: create a link, follow the redirect, see the click in
 `/stats` — served from EC2 instead of a laptop, from the same commit.
 
+### Stretch: Sealed Secrets — done 2026-08-31
+
+The DB password no longer sits in plaintext in a public repo. The sealed-secrets
+controller (vendored, pinned v0.39.1, delivered by Argo under the `platform`
+project) holds an RSA private key in-cluster; each values overlay carries
+ciphertext produced by `kubeseal`, and the controller unseals it into the same
+`Secret` the app already read. No consumer changed.
+
+dev and prod were **rotated** to fresh 32-character passwords rather than just
+hidden — the old value had been public for weeks. Runbook: `docs/SECRETS.md`.
+
 ### Still open
 
-- **sealed-secrets / external-secrets** so the DB Secret isn't plaintext in git.
+- Nothing planned. Possible future work: key rotation on a schedule, encryption
+  at rest for etcd on EKS (a KMS `encryption_config`), and swapping the demo
+  Postgres for RDS.
