@@ -17,7 +17,7 @@ serviceMonitor:
   enabled: true
 image:
   repository: ghcr.io/genkuroo/url-shortener
-  tag: f0f3141
+  tag: 524b4ec
   pullPolicy: IfNotPresent
 # --- Sealed database password -------------------------------------------------
 # The real dev password, encrypted with the sealed-secrets controller's public
