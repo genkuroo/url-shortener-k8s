@@ -15,7 +15,7 @@ watched the signals himself, not just read about someone else's run.
 
 | # | Module | What breaks | Status |
 |---|---|---|---|
-| 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Not done.** Claude ran it once solo to demo the mechanism (see Findings below) — Ethan has not personally driven it yet. |
+| 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
 | 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | Designed, not run. Lab steps below. |
 | 3 | Pod-level failure injection | OOMKill, crash loops, bad readiness probes | Not designed yet |
 | 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
@@ -65,6 +65,45 @@ kubectl -n url-shortener-prod describe hpa prod-url-shortener
 Also useful: `kubectl -n url-shortener-prod get events --sort-by='.lastTimestamp'`,
 `kubectl -n url-shortener-prod top pods`, `make grafana-ui` (localhost:3000,
 admin/admin), `make prometheus-ui` (localhost:9090).
+
+### Concepts drilled hands-on (2026-09-04/05)
+
+Ethan's own run surfaced this behavior live — replicas scaled up, then sat at 9
+for several minutes with CPU already back down at 2%. Turned into a deeper pass
+than originally scoped, worth keeping:
+
+- **Scale-up is instant, scale-down is deliberately slow.** Unconfigured HPA
+  `behavior` defaults to `stabilizationWindowSeconds: 0` on scale-up, `300`
+  (5 min) on scale-down — it looks back over the last 5 min of recommendations
+  and applies the *highest* one, specifically to avoid flapping on bursty
+  traffic. Confirmed via `grep -rn behavior charts/` — nothing in this repo
+  configures it; it's pure Kubernetes default, same as HPA/PDB being core API
+  types kind ships for free but does nothing with until you use them.
+- **HPA failure modes** (the logged weak spot, now drilled): it's reactive not
+  instant (~22s lag before first scale-up in the run above); pods still need
+  schedulable *nodes* — HPA and a node-level autoscaler (Cluster
+  Autoscaler/Karpenter) are two separate layers; CPU-based HPA is blind to a
+  non-CPU bottleneck (a saturated DB won't show as high CPU) — direct segue
+  into Module 2.
+- **CPU limits throttle; memory limits kill.** Same `resources:` block, two
+  different failure modes — foreshadows Module 3.
+- **No PodDisruptionBudget exists on this Deployment** (`kubectl get pdb` —
+  empty). PDB governs *voluntary* disruptions only (node drains, managed node
+  group upgrades, Cluster Autoscaler consolidation) — never involuntary ones
+  (crashes, OOMKills). `minReplicas: 3` is a load-scaling floor, not a
+  maintenance-disruption guarantee; those are different problems. A PDB also
+  can't fix the single-replica Postgres pod — no redundancy to protect.
+- **Draining a node** = cordon (stop new scheduling) + evict existing pods one
+  at a time via the Eviction API (which is what checks the PDB). Pods aren't
+  migrated — they're terminated with a grace period (SIGTERM, default 30s)
+  and a *replacement* pod is scheduled elsewhere; what's preserved is
+  workload capacity and in-flight requests, not the pod itself.
+- **Draining is automated on managed cloud node groups** (EKS/GKE/AKS node
+  version bumps, Cluster Autoscaler/Karpenter consolidation) but fully manual
+  on unmanaged/self-managed clusters — including this local kind cluster,
+  which has no cloud-provider automation layer at all. Argo CD (this
+  project's GitOps tool) has nothing to do with node draining — it reconciles
+  workloads against Git, a completely separate concern from node lifecycle.
 
 ### Findings from Claude's solo run (2026-09-04) — reference only, re-verify hands-on
 
