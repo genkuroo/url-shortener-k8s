@@ -16,7 +16,7 @@ watched the signals himself, not just read about someone else's run.
 | # | Module | What breaks | Status |
 |---|---|---|---|
 | 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
-| 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | Designed, not run. Lab steps below. |
+| 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Done (2026-09-05/06), hypothesis not confirmed — see Findings.** Ethan ran it hands-on; connections never piled up (peaked at 12/100). Real finding was different from the one hypothesized: no pooling shows up as CPU overhead, not connection exhaustion, at this load level. The originally-hypothesized "low CPU / high latency" signature needs an artificially slow query (`pg_sleep`) to reproduce — not yet run, planned as a follow-up. |
 | 3 | Pod-level failure injection | OOMKill, crash loops, bad readiness probes | Not designed yet |
 | 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
 | 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
@@ -158,15 +158,79 @@ curl -s -X POST http://urlshortener.localtest.me/api/links \
 watch -n2 'kubectl -n url-shortener-prod exec prod-url-shortener-postgres-0 -- \
   psql -U appuser -d urlshortener -c "SELECT count(*) FROM pg_stat_activity;"'
 
-# 2 — fire load at the REAL path, capturing status codes this time
-kubectl -n url-shortener-prod run db-load-test --rm -i --restart=Never --image=alpine:3 -- \
-  sh -c 'for i in $(seq 1 80); do
-    (while true; do wget -q -S -O- http://prod-url-shortener/<YOUR_CODE> 2>&1 | grep "HTTP/"; done) &
-  done; sleep 60'
+# 2 — fire load at the REAL path, capturing status codes this time.
+# One line on purpose — see the paste gotcha below.
+kubectl -n url-shortener-prod run db-load-test --rm -i --restart=Never --image=alpine:3 -- sh -c 'for i in $(seq 1 80); do (while true; do wget -q -S -O- http://prod-url-shortener/<YOUR_CODE> 2>&1 | grep "HTTP/"; done) & done; sleep 60'
 
 # 3 — app side, same as module 1
 kubectl -n url-shortener-prod get hpa,pods -w
 ```
+
+**Terminal-paste gotcha (hit live, worth keeping):** the first attempt used a
+multi-line version of the load-test command and zsh choked with
+`bad pattern: [200~kubectl` — that's a leaked *bracketed-paste* marker
+(`\e[200~`/`\e[201~`, the invisible codes a terminal wraps around a paste so
+the shell treats it as one block), and when it leaks through as literal text
+zsh tries to glob-match the brackets and aborts before `kubectl` ever runs.
+Fix: collapse multi-line `kubectl run ... sh -c '...'` commands to one line
+before pasting into zsh — nothing left for the paste marker to corrupt.
+
+### Findings from Ethan's hands-on run (2026-09-05/06)
+
+| Signal | Baseline | Peak during load | Read as |
+|---|---|---|---|
+| Postgres connections (`pg_stat_activity`) | 6 | 12 | Nowhere near the 100 ceiling — no pileup |
+| HPA CPU | 3–6% | 96% (then 92%) | Real pressure, HPA reacted |
+| Replicas | 3 | 5 (`ceil(3 × 96/60)`) | Proportional HPA math, not a fixed step |
+
+- **The connection-exhaustion hypothesis didn't hold at this load level.**
+  `_connect()` really does open a fresh connection per request (confirmed:
+  count visibly moved off baseline under load), but each one lives only a few
+  milliseconds — open, `SELECT`+`INSERT`, commit, close — so 80 concurrent
+  loops never built a backlog. No pooling is a **latent risk, not an active
+  one** here: it only becomes a real failure mode when connections are held
+  open longer than new ones arrive (much higher concurrency, or a slow query).
+- **CPU still spiked meaningfully (96%, 3→5 replicas) — but for a different
+  reason than Module 1.** Establishing a *new* TCP + Postgres-auth handshake
+  and spawning a fresh backend process on every request is itself real CPU
+  work that a pool would let you skip entirely. So the missing pool showed up
+  as a CPU tax, not a connection-count crisis — a genuinely different, more
+  nuanced finding than the one we set out to reproduce.
+- **Peak CPU here (96%) was much lower than Module 1's pure `/healthz` test
+  (251%), despite similar tooling.** Cause: `wget` follows redirects by
+  default. `/{code}` returns a `307` which `wget` then follows out to
+  `https://example.com` — a second HTTP round trip per loop iteration that
+  costs zero cluster CPU (it's an external site) but eats real wall-clock time
+  each loop spends waiting instead of hammering the app back-to-back. Net
+  effect: this test was quietly load-testing `example.com` too, and only
+  landing roughly half its requests on the actual app. (`wget --max-redirect=0`
+  would fix this if re-run for a fairer comparison against Module 1.)
+- **We did not reproduce the "low CPU + high latency" signature** — the
+  original point of testing the DB path. That pattern needs the dependency
+  itself to be slow (queries genuinely queuing/blocking), not just numerous.
+  Postgres was never under real stress here, so the pods were always doing
+  real work, never blocked waiting — hence CPU rose instead of staying flat.
+  **Next step, not yet run:** add an artificial delay (`pg_sleep(1)`) inside
+  one query so connections are held open instead of released instantly — the
+  actual mechanism behind a real "slow dependency" incident, and the scenario
+  the HPA (CPU-only) would be blind to.
+
+## Operational note: pausing the cluster without destroying it
+
+Discovered 2026-09-06: after ~49–56 days of continuous uptime, the cluster
+(3 kind nodes + Postgres + Argo CD + Prometheus/Grafana, all inside Colima's
+VM) was a measurable drag on the host laptop — Colima's VM disk image alone
+had grown to **19GB**, plus the always-on RAM/CPU reservation competing with
+everything else running. Confirmed via `colima status`, `ps aux`, `vm_stat`
+that stopping it fully released those resources.
+
+**To pause for a while and resume later, use `colima stop` / `colima start` —
+never `make down`.** `make down` calls `kind delete cluster`, which destroys
+everything (Postgres data, Argo CD state, all Helm releases) and requires a
+full `make up` rebuild. `colima stop` just pauses the VM; all container
+filesystems are untouched on disk and come back with `colima start`. Expect a
+possible transient `FailedGetScale: Unauthorized` in `describe hpa` right
+after resuming (see Module 1 findings) — self-heals within a minute, harmless.
 
 ## Modules 3–5
 
