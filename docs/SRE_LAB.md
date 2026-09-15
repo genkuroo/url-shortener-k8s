@@ -16,7 +16,7 @@ watched the signals himself, not just read about someone else's run.
 | # | Module | What breaks | Status |
 |---|---|---|---|
 | 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
-| 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Done (2026-09-05/06), hypothesis not confirmed — see Findings.** Ethan ran it hands-on; connections never piled up (peaked at 12/100). Real finding was different from the one hypothesized: no pooling shows up as CPU overhead, not connection exhaustion, at this load level. The originally-hypothesized "low CPU / high latency" signature needs an artificially slow query (`pg_sleep`) to reproduce — not yet run, planned as a follow-up. |
+| 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-14).** Three sub-tests, see below. The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead and is now fixed. |
 | 3 | Pod-level failure injection | OOMKill, crash loops, bad readiness probes | Not designed yet |
 | 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
 | 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
@@ -215,6 +215,126 @@ before pasting into zsh — nothing left for the paste marker to corrupt.
   actual mechanism behind a real "slow dependency" incident, and the scenario
   the HPA (CPU-only) would be blind to.
 
+### Follow-up A — an artificial `pg_sleep`, hands-on (2026-09-10)
+
+The connection-exhaustion hypothesis above needs a dependency that's actually
+*slow* (queries genuinely blocking), not just numerous. Rather than edit
+`app/main.py` (prod pulls its image from GHCR since Phase 7, so an app change
+means rebuild → push → Argo sync, and it muddies "what changed"), the fault was
+injected straight into the live database as a trigger:
+
+```sql
+CREATE FUNCTION slow_click() RETURNS trigger AS $$
+BEGIN PERFORM pg_sleep(1); RETURN NEW; END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER clicks_slow BEFORE INSERT ON clicks
+  FOR EACH ROW EXECUTE FUNCTION slow_click();
+```
+
+`/{code}`'s `INSERT INTO clicks` now takes 1s, holding its connection open for
+that long instead of releasing it instantly. One dropped/re-added the whole
+thing several times before it worked — worth keeping as the failure modes are
+mundane and recurring:
+
+- Pasting `C=<CODE>` literally into a `kubectl run ... sh -c` one-liner: zsh
+  reads `<` as input redirection from a file called `CODE`, then chokes —
+  `sh: syntax error: unexpected ";"`.
+- Substituting a placeholder code (`abc123`, or a code from an *example* in
+  chat) instead of the actual code returned by `POST /api/links`. Every
+  request 404s before reaching the `INSERT`, so the trigger never fires — the
+  run looks active (real CPU, real HPA scaling) but is silently testing the
+  wrong thing entirely, indistinguishable from a real result unless you check
+  for `307`/`~1s` first.
+- `kubectl get hpa,deployment -w` fails on a newer kubectl:
+  `error: you may only specify a single resource type` — watching two
+  resource kinds together is no longer allowed; split into two `kubectl get
+  <kind> -w` panes.
+- `kubectl logs -l ... -f` across many pods: `maximum allowed concurrency is
+  5, use --max-log-requests` — cap it or drop `-f` for a point-in-time check.
+
+**The correct run** (real code, trigger confirmed via
+`SELECT tgname FROM pg_trigger`, a single curl proving `307` in ~1s *before*
+generating load), at 40 concurrent loops:
+
+| Signal | Reading |
+|---|---|
+| Client latency | steady `307 ~1.01s` — every request pays the full second |
+| App pod CPU | 12–18m of a 100m request — pods idle, blocked on the socket |
+| Postgres CPU | 166m (down from 497m during an earlier bad run) |
+| HPA `TARGETS` | fell to 2–15%/60% — **no scale-up** |
+| PG connections | plateaued ~67/100, held open (vs. ~6 baseline) |
+
+This is the signature the module was chasing: users in pain (1s on every
+request), CPU near zero, so a CPU-only HPA has no signal and does nothing. A
+slow dependency is invisible to it — you'd only catch this on a latency or
+saturation metric. At this concurrency nothing queued (3 pods × 40 worker
+threads = 120 slots > 40 loops), so latency sat flat instead of climbing, and
+the ceiling was never approached — left for the next test.
+
+### Follow-up B — a table lock, and an unplanned discovery (2026-09-14)
+
+A cleaner way to force the *hard* failure (Postgres's `max_connections: 100`
+ceiling): an uncommitted transaction holding an exclusive lock, instead of a
+timed sleep. `pg_sleep` self-throttles — every connection releases itself
+after 1s, so connections drain almost as fast as they fill, which is why the
+above never approached the ceiling. A lock doesn't let go until you say so:
+
+```sql
+BEGIN;
+LOCK TABLE clicks IN ACCESS EXCLUSIVE MODE;  -- held open, not committed
+```
+
+`/{code}`'s `SELECT` still works (different table); the `INSERT` right after
+blocks indefinitely. Run by Claude at Ethan's explicit request while Ethan
+observed (not independently re-run hands-on by Ethan — flagged here rather
+than folded silently into "done"), 120 concurrent loops against the real code:
+
+**What happened was not the connection-ceiling test — it was worse, and more
+useful.** Around 45–60s in, all 40 worker threads per pod filled with
+requests blocked on the lock. `/healthz` shares that exact thread pool despite
+touching no database — so it stopped being able to run at all. The literal
+kubelet event:
+
+```
+Liveness probe failed: Get "http://...:8000/healthz": context deadline
+exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+Kubernetes concluded the pods were dead and killed them — pods that were
+never actually broken, just busy. Readiness then also failed post-restart
+(`connection refused`, container still starting). Nearly every pod restarted
+1–9 times within ~90 seconds; each restart severed that pod's blocked
+Postgres connections, so the connection count kept getting yanked back down
+instead of climbing to a clean plateau — the original hard-failure hypothesis
+(`FATAL: sorry, too many clients already`) was never actually reached,
+because Kubernetes' own self-healing intervened first. The HPA scaled to its
+max (9 replicas), but from the CPU cost of repeated container restarts, not
+from sustained real load — a good example of an autoscaling metric being
+noisy and misleading during a cascading probe-failure incident, and of
+automated remediation (restart-on-failed-liveness) making an incident worse:
+killing an overloaded-but-fine pod doesn't fix overload, it just adds churn.
+
+**Root cause:** `/healthz` was defined as a synchronous `def`, so FastAPI ran
+it through the same shared worker-thread pool as every DB-touching route.
+Being "DB-free" in its own code didn't matter once that pool was fully
+occupied by other requests — it never got a thread to run on.
+
+**Fix applied (2026-09-15):** `/healthz` in `app/main.py` is now `async def`
+instead of `def`. An async route runs directly on the event loop, never
+touching the shared thread pool, so it now answers even when every worker
+thread is wedged. Not yet rebuilt/redeployed or re-tested against a live
+repeat of this fault — that's the natural next step to actually confirm it.
+
+**Layers not yet applied, for later:**
+- A `lock_timeout`/`statement_timeout` on the app's DB connections, so a
+  stuck query fails fast instead of holding a thread (and a connection)
+  forever — bounds the *next* version of this incident, not just this one.
+- Liveness and readiness currently point at the identical check with nearly
+  identical thresholds. Liveness failing is destructive (kills the
+  container) and should be reserved for "truly wedged, will never recover" —
+  not "currently busy." Readiness failing is what should have happened here:
+  pull the pod from the Service, no restart, no churn.
+
 ## Operational note: pausing the cluster without destroying it
 
 Discovered 2026-09-06: after ~49–56 days of continuous uptime, the cluster
@@ -237,7 +357,12 @@ after resuming (see Module 1 findings) — self-heals within a minute, harmless.
 Not designed yet. Rough intent, to fill in when we get there:
 - **3 (pod failure injection):** `kubectl delete pod` mid-load, a deliberately
   wrong `readinessProbe`, a memory limit set below actual usage to trigger
-  OOMKill — read `kubectl describe pod` events and restart counts.
+  OOMKill — read `kubectl describe pod` events and restart counts. Already has
+  a real, unplanned head start: Module 2's table-lock test (above) showed
+  liveness/readiness sharing a thread pool with request handling, causing
+  Kubernetes to kill busy-but-healthy pods. Worth designing this module
+  around the liveness-vs-readiness distinction directly — which probe should
+  fail, and whether failing it should restart the pod at all.
 - **4 (network/dependency):** break ingress-nginx routing or simulate a slow
   Postgres (e.g. an artificial `pg_sleep` in a query) and drill the four
   golden signals + "what changed" triage end-to-end.

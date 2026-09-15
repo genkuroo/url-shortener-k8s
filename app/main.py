@@ -270,11 +270,19 @@ def root():
 
 
 @app.get("/healthz")
-def healthz():
+async def healthz():
     """Liveness/readiness probe. Kubernetes hits this to check the app is alive.
 
     Kept deliberately DB-free: it answers as long as the web process is up, so a
     brief database hiccup doesn't make Kubernetes kill an otherwise-healthy pod.
+
+    async, not def: a sync route runs on FastAPI's shared worker-thread pool —
+    the same pool every DB-touching route uses. If those threads are all blocked
+    (a stuck query, a table lock, connection exhaustion), a sync /healthz can't
+    get scheduled either, and Kubernetes kills a pod that was never actually
+    broken — just busy. async def runs directly on the event loop instead, so it
+    answers even when every worker thread is wedged. Found live on 2026-09-14:
+    see docs/SRE_LAB.md, Module 2 closing finding.
     """
     return {"status": "ok"}
 
