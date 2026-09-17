@@ -16,7 +16,7 @@ watched the signals himself, not just read about someone else's run.
 | # | Module | What breaks | Status |
 |---|---|---|---|
 | 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
-| 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-14).** Three sub-tests, see below. The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead and is now fixed. |
+| 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-17).** The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead, got fixed in two layers (async liveness, capacity-aware readiness), shipped through the real CI/CD pipeline, and verified on both dev and prod. |
 | 3 | Pod-level failure injection | OOMKill, crash loops, bad readiness probes | Not designed yet |
 | 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
 | 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
@@ -412,6 +412,30 @@ traffic. With one replica, "graceful" and "total outage" are the same event.
 Prod runs `minReplicas: 3`, so the same fault there should pull one bad pod
 while the other two keep serving — degraded, not dark; worth confirming
 directly when this ships to prod, not just assumed.
+
+**Confirmed on prod (2026-09-17).** Both fixes promoted via `promote.yml`
+(the exact tag verified on dev, `196e475`), Argo rolled all 3 replicas
+cleanly, 0 restarts. Re-ran the identical table-lock fault, this time aimed
+at **one specific pod's IP directly** (bypassing the Service's round-robin)
+so exactly one of three would saturate on purpose, rather than leaving it to
+chance:
+
+| | |
+|---|---|
+| Targeted pod | `NotReady` at t=12s, pulled from the Service's endpoint list |
+| Other two pods | stayed `Ready` the entire test, never left the endpoint list |
+| Public traffic (`urlshortener.localtest.me/healthz`, through ingress) | **`200` on every check, the full 84s** — zero visible degradation |
+| Restarts, all 3 pods | **0** |
+| HPA | `4%/60%`, untouched — nothing CPU-expensive happened this time |
+| Recovery | targeted pod rejoined `Ready` and the endpoint list automatically at t=57s, right after the lock released |
+
+This is the dev result's mirror image, exactly as predicted: identical fault,
+identical fix, but `minReplicas: 3` turns "one pod wedged" into invisible
+degraded capacity instead of a total outage. Module 2 closes here — the
+original connection-exhaustion hypothesis was never confirmed, but the path
+that replaced it (async liveness → capacity-aware readiness → redundancy)
+produced two real, shipped, prod-verified fixes and a clear demonstration of
+why they only work together.
 
 **Layer not yet applied, for later:**
 - A `lock_timeout`/`statement_timeout` on the app's DB connections, so a
