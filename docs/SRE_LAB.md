@@ -51,10 +51,17 @@ Not a fixed RPS — no rate limiter, no pacing. Each loop fires the next request
 the instant the last one returns, so throughput self-reinforces as the app
 scales out and gets faster.
 
-**Lab (three terminals):**
+**Lab (four terminals):**
 ```sh
-# 1 — the scaling decision
-kubectl -n url-shortener-prod get hpa,deployment -w
+# 1 — the scaling decision (HPA). NOTE: `get hpa,deployment -w` looks tempting
+# but kubectl rejects --watch on more than one resource type at once
+# ("error: you may only specify a single resource type") — confirmed on
+# v1.36.2/v1.36.1, and there's no combination of types where it's allowed
+# (tested even two plain core types together, still rejected). Split it:
+kubectl -n url-shortener-prod get hpa -w
+
+# 1b — the scaling decision (Deployment), separate pane
+kubectl -n url-shortener-prod get deployment prod-url-shortener -w
 
 # 2 — fire the load
 make load-test LOAD_CONCURRENCY=80 LOAD_DURATION=180
@@ -64,7 +71,10 @@ kubectl -n url-shortener-prod describe hpa prod-url-shortener
 ```
 Also useful: `kubectl -n url-shortener-prod get events --sort-by='.lastTimestamp'`,
 `kubectl -n url-shortener-prod top pods`, `make grafana-ui` (localhost:3000,
-admin/admin), `make prometheus-ui` (localhost:9090).
+admin/admin), `make prometheus-ui` (localhost:9090). For watching several
+resource types together without juggling panes, see the note on `k9s` and on
+building a Grafana dashboard from the `kube-state-metrics` this cluster
+already runs, further down.
 
 ### Concepts drilled hands-on (2026-09-04/05)
 
@@ -467,6 +477,33 @@ full `make up` rebuild. `colima stop` just pauses the VM; all container
 filesystems are untouched on disk and come back with `colima start`. Expect a
 possible transient `FailedGetScale: Unauthorized` in `describe hpa` right
 after resuming (see Module 1 findings) — self-heals within a minute, harmless.
+
+## Operational note: watching several resource types at once
+
+`kubectl get <type1>,<type2> -w` doesn't work — confirmed unconditional (even
+two plain core types like `pods,replicasets` are rejected the same way), not
+version- or resource-specific. Two real options instead of split panes:
+
+- **`k9s`** (`brew install k9s`) — a terminal UI that talks to the same
+  watch API directly. Doesn't merge two types into one table either, but
+  switching between live single-type views is a two-character command
+  (`:hpa`, `:deploy`, `:pods`) instead of a fresh `kubectl` invocation in a
+  new pane, and it drills into logs/shell/describe from the same screen.
+- **Grafana** (`make grafana-ui`) — a genuinely different category: not a
+  live object-state viewer, a stored *metrics* dashboard. This cluster
+  already runs `kube-state-metrics` (part of the `kube-prometheus-stack`
+  install from Module 5's monitoring phase), which turns Kubernetes object
+  state itself — HPA current/desired replicas, deployment ready-replica
+  counts, pod restart counts, pod ready/not-ready — into Prometheus metrics.
+  That means a single dashboard with multiple panels (HPA target %, replica
+  count, restart count, ready-pod count) is genuinely buildable, all
+  auto-refreshing together. The real tradeoff: Grafana refreshes on
+  Prometheus's scrape interval (commonly 15–30s), not instantly like `-w` —
+  fine for watching a trend over minutes, too coarse for the kind of fast
+  fault injection this lab does (a lock going up and a pod flipping
+  `NotReady` inside 10–15s can blur or be missed entirely between scrapes).
+  That's why every module here uses raw `kubectl` polling every 2–5s instead
+  of Grafana during an active test.
 
 ## Modules 3–5
 
