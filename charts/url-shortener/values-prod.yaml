@@ -46,9 +46,8 @@ dashboard:
   enabled: true
 image:
   repository: ghcr.io/genkuroo/url-shortener
-  tag: ba71052
+  tag: 196e475
   pullPolicy: IfNotPresent
-
 # --- Sealed database password -------------------------------------------------
 # The real prod password, encrypted with the sealed-secrets controller's public
 # key. Safe to commit: only the controller's private key — which never leaves the
