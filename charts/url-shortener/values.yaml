@@ -23,8 +23,11 @@ app:
   # CPU/memory requests + limits. Empty by default (dev); prod sets real values,
   # which Phase 6's HorizontalPodAutoscaler will also depend on.
   resources: {}
-  # Health checks hit /healthz (deliberately DB-free so a DB blip doesn't restart
-  # the app). Timings match the raw manifests.
+  # Liveness hits /healthz (DB-free — "is the process alive"); readiness hits
+  # /readyz (checks the worker-thread pool has spare capacity — "can this pod
+  # actually do work right now"). Deliberately different endpoints since
+  # Module 2 found them sharing one meant a saturated-but-alive pod could get
+  # killed instead of just pulled from traffic. Timings match the raw manifests.
   readinessProbe:
     initialDelaySeconds: 3
     periodSeconds: 5

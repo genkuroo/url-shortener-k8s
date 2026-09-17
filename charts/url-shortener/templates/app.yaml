@@ -99,9 +99,16 @@ spec:
                   key: POSTGRES_DB
             - name: DATABASE_URL
               value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+          # readiness and liveness deliberately point at DIFFERENT endpoints now
+          # (see docs/SRE_LAB.md, Module 2). Liveness (/healthz) only answers "is
+          # the process alive" and should almost never fail from load, since
+          # failing it is destructive (Kubernetes kills the pod). Readiness
+          # (/readyz) answers "does this pod have a free worker thread right
+          # now" — failing it just pulls the pod out of the Service's routing,
+          # no restart, and it rejoins on its own once capacity frees up.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 8000
             initialDelaySeconds: {{ .Values.app.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.app.readinessProbe.periodSeconds }}

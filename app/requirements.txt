@@ -2,3 +2,7 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 psycopg2-binary==2.9.9
 prometheus-fastapi-instrumentator==7.1.0
+# anyio is already pulled in transitively by fastapi/starlette (confirmed
+# 4.15.1 in the built image), but /readyz imports it directly now, so it's
+# pinned explicitly rather than relying on someone else's transitive version.
+anyio==4.15.1

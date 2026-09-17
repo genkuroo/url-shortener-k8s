@@ -319,21 +319,67 @@ it through the same shared worker-thread pool as every DB-touching route.
 Being "DB-free" in its own code didn't matter once that pool was fully
 occupied by other requests — it never got a thread to run on.
 
-**Fix applied (2026-09-15):** `/healthz` in `app/main.py` is now `async def`
-instead of `def`. An async route runs directly on the event loop, never
-touching the shared thread pool, so it now answers even when every worker
-thread is wedged. Not yet rebuilt/redeployed or re-tested against a live
-repeat of this fault — that's the natural next step to actually confirm it.
+**Fix 1 applied and verified (2026-09-15):** `/healthz` in `app/main.py` is
+now `async def` instead of `def`, so it runs on the event loop instead of the
+shared worker-thread pool. Shipped through the real pipeline (commit → push →
+CI build+push to GHCR → Argo sync to dev) and re-tested on dev by repeating
+this exact table-lock fault against the freshly deployed image — 1 replica,
+60 concurrent loops (over the 40-thread pool), lock held ~70s:
 
-**Layers not yet applied, for later:**
+| | Before (prod, sync `healthz`) | After (dev, async `healthz`, same fault) |
+|---|---|---|
+| Restarts | up to 9 in ~90s | **0** |
+| `/healthz` while saturated | timed out (`context deadline exceeded`) | **200 in 3–9ms**, every check |
+| Connections | chaotic (33 ↔ 105, kept getting severed by restarts) | climbed to 42, **held flat** — clean plateau |
+| Probe-failure events | multiple `Unhealthy` | **none** |
+
+Confirms the mechanism precisely: the pod's *actual* work (every `/{code}`
+request) still stalls exactly as before — that part is untouched — but
+Kubernetes now correctly reads "alive, just busy" instead of "dead," and
+stops making the incident worse by restarting a pod that isn't broken.
+
+**What fix 1 alone does *not* solve — and makes slightly worse in one way:**
+liveness and readiness pointed at the same endpoint, so fixing it made
+*readiness* report healthy too. A pod with all 40 threads permanently wedged
+now stays in the Service's traffic rotation indefinitely — Kubernetes has no
+signal that it can't actually do anything, so it keeps routing new requests
+into a queue that will never drain. Silent, dashboard-green, zero real
+capacity — worse than the restart storm in the sense that nothing about it
+looks wrong from the outside.
+
+**Fix 2 applied (2026-09-16):** a new `/readyz` endpoint, separate from
+`/healthz`, answers a different question — not "is the process alive" but
+"does this pod have spare capacity right now." It reads FastAPI's shared
+worker-thread limiter directly (`anyio.to_thread.current_default_thread_
+limiter()`) and returns `503` once `available_tokens` hits 0. Deliberately
+reads a counter instead of running a query or acquiring a connection, so the
+readiness check itself can never get stuck in the exact contention it exists
+to detect. The Helm chart's `readinessProbe` now points at `/readyz` while
+`livenessProbe` stays on `/healthz` (`charts/url-shortener/templates/
+app.yaml`, chart bumped to 0.5.0) — the two probes finally check two
+different things instead of one shared one. `anyio` (already a transitive
+dependency via FastAPI/Starlette, confirmed 4.15.1 in the built image) is now
+pinned directly in `requirements.txt` since the app imports it itself.
+
+Net effect once this ships: a saturated pod fails *readiness* (pulled from
+the Service, no restart) while liveness stays green (it's not broken) — and
+it rejoins automatically the moment a thread frees up. No restart, no manual
+intervention, no more silent black hole. Not yet run through the pipeline or
+re-tested against a live repeat of the fault — that's the next step.
+
+**Layer not yet applied, for later:**
 - A `lock_timeout`/`statement_timeout` on the app's DB connections, so a
   stuck query fails fast instead of holding a thread (and a connection)
-  forever — bounds the *next* version of this incident, not just this one.
-- Liveness and readiness currently point at the identical check with nearly
-  identical thresholds. Liveness failing is destructive (kills the
-  container) and should be reserved for "truly wedged, will never recover" —
-  not "currently busy." Readiness failing is what should have happened here:
-  pull the pod from the Service, no restart, no churn.
+  forever. This is what actually frees the wedged threads back up on its
+  own — without it, a saturated pod stays readiness-failed until whatever
+  external thing is blocking it (the lock, in our test) resolves; with it,
+  the pod can self-heal within seconds even if nobody is watching. For this
+  app specifically, every query is a simple indexed lookup or single-row
+  insert with no legitimate reason to take more than tens of milliseconds,
+  so an aggressive `lock_timeout` (~1s) and `statement_timeout` (~2s) are
+  both safe here — a genuinely slow, legitimate query would be a sign that
+  work belongs in a background job, not this request path, rather than a
+  reason to raise the number.
 
 ## Operational note: pausing the cluster without destroying it
 

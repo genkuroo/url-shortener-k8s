@@ -29,6 +29,7 @@ import string
 import sys
 import time
 
+import anyio
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Request
@@ -271,7 +272,7 @@ def root():
 
 @app.get("/healthz")
 async def healthz():
-    """Liveness/readiness probe. Kubernetes hits this to check the app is alive.
+    """Liveness probe. Kubernetes hits this to check the process is alive.
 
     Kept deliberately DB-free: it answers as long as the web process is up, so a
     brief database hiccup doesn't make Kubernetes kill an otherwise-healthy pod.
@@ -283,8 +284,42 @@ async def healthz():
     broken — just busy. async def runs directly on the event loop instead, so it
     answers even when every worker thread is wedged. Found live on 2026-09-14:
     see docs/SRE_LAB.md, Module 2 closing finding.
+
+    Liveness only now — see /readyz for the separate readiness check.
     """
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz():
+    """Readiness probe — separate from /healthz on purpose.
+
+    /healthz (liveness) answers "is the process alive" and should almost never
+    fail from load — failing it is destructive (Kubernetes kills the pod), so
+    it's reserved for "truly wedged, will never recover on its own."
+
+    /readyz answers a different question: "does this pod have spare capacity to
+    actually do work right now." Every sync route (the DB-touching ones) runs
+    on a shared worker-thread pool of a fixed size. If a slow or stuck
+    dependency occupies all of them — exactly what happened during the Module 2
+    table-lock test — the pod is alive but useless: new requests would just
+    queue behind the stuck ones with no end in sight. Failing readiness pulls
+    the pod out of the Service's routing without killing it, and it rejoins
+    automatically the moment a thread frees up. No restart, no manual fix.
+
+    Reads the thread pool's own limiter directly instead of running a query or
+    acquiring a connection, so this check can never get stuck in the exact
+    contention it exists to detect.
+    """
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    body = {
+        "status": "ok" if limiter.available_tokens > 0 else "saturated",
+        "available_threads": limiter.available_tokens,
+        "total_threads": limiter.total_tokens,
+    }
+    if limiter.available_tokens <= 0:
+        raise HTTPException(status_code=503, detail=body)
+    return body
 
 
 @app.post("/api/links", status_code=201)
