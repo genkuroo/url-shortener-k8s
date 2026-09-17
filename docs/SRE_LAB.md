@@ -364,8 +364,54 @@ pinned directly in `requirements.txt` since the app imports it itself.
 Net effect once this ships: a saturated pod fails *readiness* (pulled from
 the Service, no restart) while liveness stays green (it's not broken) — and
 it rejoins automatically the moment a thread frees up. No restart, no manual
-intervention, no more silent black hole. Not yet run through the pipeline or
-re-tested against a live repeat of the fault — that's the next step.
+intervention, no more silent black hole.
+
+**Shipped and verified on dev (2026-09-17).** Went through the real pipeline
+(commit → push → CI build+push → Argo sync), then the same table-lock fault
+was repeated against dev, this time watching `/readyz`, the pod's `Ready`
+condition, and the Service's `Endpoints` object together:
+
+| | |
+|---|---|
+| `/readyz` under saturation | `{"status":"saturated","available_threads":0,"total_threads":40}` |
+| Pod pulled from Service endpoints | moved from `addresses` to `notReadyAddresses`; kubelet logged `Readiness probe failed: ... statuscode: 503` |
+| Restarts, entire test | **0** |
+| After lock released | pod flipped back to `Ready` and rejoined endpoints **automatically** — `/readyz` back to `40/40`, no restart, no manual fix |
+
+Confirms the fix does exactly what it's for: a saturated pod is pulled from
+traffic, not killed, and self-heals the moment capacity returns.
+
+**Gotcha hit along the way — a CI/CD race between a chart change and the
+image that implements it.** The probe-path change (`readinessProbe` →
+`/readyz`, in the chart) and the code that serves that route (in the image)
+landed in the same commit, but they don't *ship* at the same time: the chart
+change is live the instant Argo syncs the commit, while the new image only
+exists once CI's build job finishes and writes a follow-up commit a minute or
+two later. In that window, Argo pointed the readiness probe at `/readyz` on a
+pod still running the *previous* image — which doesn't have that route —
+so it 404'd, the rollout stalled ("1 old replicas are pending termination"),
+and the pod never went `Ready`. It self-resolved once CI's tag-bump commit
+landed and Kubernetes cut over to a ReplicaSet with the correct image+probe
+combination, but a slower CI run (or a manual chart-only edit with no
+matching image change) could leave a deployment stuck like this for a while.
+Worth remembering as its own class of CI/CD footgun: a probe change and its
+implementing code are coupled and should land together, atomically, not
+across two separate commits with a gap in between.
+
+**A second, more fundamental finding — redundancy and readiness are a
+package deal.** For part of the saturation window, `/healthz` *itself*
+returned `503` too, going in through the public hostname — but it wasn't the
+app failing (kubelet's own liveness probe, which hits the pod directly by IP
+and bypasses the Service, kept passing the whole time — that's exactly why
+restarts stayed at 0). It was **nginx** returning its own error page, because
+dev runs a single replica: the instant that one pod got marked `NotReady`,
+the Service had *zero* ready endpoints, and ingress-nginx had nowhere to
+route any request at all — mine included. Pulling a saturated pod from
+rotation only degrades gracefully if there's another pod left to take the
+traffic. With one replica, "graceful" and "total outage" are the same event.
+Prod runs `minReplicas: 3`, so the same fault there should pull one bad pod
+while the other two keep serving — degraded, not dark; worth confirming
+directly when this ships to prod, not just assumed.
 
 **Layer not yet applied, for later:**
 - A `lock_timeout`/`statement_timeout` on the app's DB connections, so a
