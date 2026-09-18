@@ -111,10 +111,29 @@ def _dsn() -> str:
 # Resolve once at import time; reuse for every connection.
 _DSN = _dsn()
 
+# How long a query is allowed to sit blocked before Postgres kills it itself.
+# Two different bounds on purpose (see docs/SRE_LAB.md, Module 2):
+#   - LOCK_TIMEOUT_MS: how long to wait to *acquire* a lock before giving up.
+#     Catches lock contention specifically - a live schema change, a forgotten
+#     open transaction, a batch job holding a table longer than expected.
+#   - STATEMENT_TIMEOUT_MS: how long a query is allowed to *run* at all, for
+#     any reason - also catches a plain slow query (e.g. a table that grew
+#     past what an index can serve quickly), not just lock waits.
+# Both are safe to set aggressively here: every query in this app is a single
+# indexed lookup or single-row insert, with no legitimate reason to take more
+# than tens of milliseconds. Without these, nothing bounds how long a stuck
+# query can hold a worker thread - which is exactly what let the Module 2
+# table-lock test hold pods hostage until the lock was released by hand.
+LOCK_TIMEOUT_MS = 1000
+STATEMENT_TIMEOUT_MS = 2000
+
 
 def _connect():
     """Open a fresh Postgres connection (one per request — simple and robust)."""
-    return psycopg2.connect(_DSN)
+    return psycopg2.connect(
+        _DSN,
+        options=f"-c lock_timeout={LOCK_TIMEOUT_MS} -c statement_timeout={STATEMENT_TIMEOUT_MS}",
+    )
 
 
 def _init_db() -> None:
