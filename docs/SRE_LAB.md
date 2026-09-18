@@ -423,6 +423,55 @@ Prod runs `minReplicas: 3`, so the same fault there should pull one bad pod
 while the other two keep serving — degraded, not dark; worth confirming
 directly when this ships to prod, not just assumed.
 
+**Fix 3 (2026-09-18): `lock_timeout`/`statement_timeout` — the self-healing
+layer.** Both probe fixes stop Kubernetes from making a stuck-DB incident
+worse, but neither one bounds how long a query can actually stay stuck — a
+saturated pod depended entirely on something else (redundancy, or readiness
+eventually pulling it) to recover. `_connect()` in `app/main.py` now opens
+every connection with `lock_timeout=1000` / `statement_timeout=2000`
+(milliseconds) via psycopg2's `options` parameter. Safe to set this
+aggressively here specifically because every query in this app is a single
+indexed lookup or single-row insert — no legitimate case for taking more than
+tens of milliseconds. Verified directly against a live lock before it even
+shipped: an `INSERT` failed with `LockNotAvailable` at exactly `1.00s`.
+
+Worth being precise about what this fixes and what it doesn't: the table
+lock itself is not something that happens naturally — nobody's database
+spontaneously grabs `ACCESS EXCLUSIVE` and sits on it forever; that was
+engineered on purpose because it's a controllable, deterministic fault for a
+lab. But the underlying *class* of problem — a request stuck waiting on the
+database long enough to tie up a worker thread — is genuinely common, just
+usually with more mundane triggers: a live schema change (`ALTER TABLE`,
+`CREATE INDEX` without `CONCURRENTLY`) run against a live table, a forgotten
+open transaction from a debugging session, a batch/cleanup job holding a
+lock longer than expected, or simply a table that grew past what an index
+can serve quickly. `lock_timeout`/`statement_timeout` don't care *why* a
+query is stuck — real cause or engineered one, they look identical to the
+app — which is why the fix generalizes rather than only patching the
+specific fault used to find it.
+
+**Verified on dev (2026-09-18), one continuous timeline (bash `SECONDS`, no
+inter-call gaps this time — an earlier two-command version of this test had
+an untrustworthy timeline and was explicitly re-run for this reason):**
+
+| t | What happened |
+|---|---|
+| 0–20s | Same fault as Fix 2's test (table lock + 60-loop saturating load) running simultaneously. `/readyz` oscillates between `saturated` (0 threads) and partial recovery (8–11 free) as blocked requests keep timing out and getting replaced. Every live request either fails **fast** (0.01–1.87s) or occasionally succeeds — **never hangs** |
+| 20s | Load's firing window ends; no more new attempts generated |
+| 22–24s | Threads fully recover to `40/40` |
+| 25s | Lock releases (matches the lock session's own `COMMIT` log) |
+| 26s+ | Genuine `307` successes resume, ~15ms — fully normal |
+
+**`podReady` stayed `true` for all 17 samples across the entire test** —
+even while repeatedly touching full saturation, it never accumulated the 3
+*consecutive* probe failures (~15s at this chart's `periodSeconds: 5`)
+needed to flip `NotReady`. The timeout resolves fast enough that readiness
+never has to step in — the layers work together exactly as designed, not
+redundantly. Restarts stayed at 0, as expected (liveness was never at risk
+here). Worst observed request latency: 1.87s — bounded, compared to the
+fully unbounded hang (however long a human chose to hold the lock) before
+this fix existed.
+
 **Confirmed on prod (2026-09-17).** Both fixes promoted via `promote.yml`
 (the exact tag verified on dev, `196e475`), Argo rolled all 3 replicas
 cleanly, 0 restarts. Re-ran the identical table-lock fault, this time aimed
