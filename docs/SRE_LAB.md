@@ -496,20 +496,6 @@ that replaced it (async liveness → capacity-aware readiness → redundancy)
 produced two real, shipped, prod-verified fixes and a clear demonstration of
 why they only work together.
 
-**Layer not yet applied, for later:**
-- A `lock_timeout`/`statement_timeout` on the app's DB connections, so a
-  stuck query fails fast instead of holding a thread (and a connection)
-  forever. This is what actually frees the wedged threads back up on its
-  own — without it, a saturated pod stays readiness-failed until whatever
-  external thing is blocking it (the lock, in our test) resolves; with it,
-  the pod can self-heal within seconds even if nobody is watching. For this
-  app specifically, every query is a simple indexed lookup or single-row
-  insert with no legitimate reason to take more than tens of milliseconds,
-  so an aggressive `lock_timeout` (~1s) and `statement_timeout` (~2s) are
-  both safe here — a genuinely slow, legitimate query would be a sign that
-  work belongs in a background job, not this request path, rather than a
-  reason to raise the number.
-
 ## Operational note: pausing the cluster without destroying it
 
 Discovered 2026-09-06: after ~49–56 days of continuous uptime, the cluster
