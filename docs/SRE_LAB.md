@@ -17,7 +17,7 @@ watched the signals himself, not just read about someone else's run.
 |---|---|---|---|
 | 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
 | 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-17).** The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead, got fixed in two layers (async liveness, capacity-aware readiness), shipped through the real CI/CD pipeline, and verified on both dev and prod. |
-| 3 | Pod-level failure injection | OOMKill, mid-load pod deletion, a bad readiness probe on rollout | **In progress (2026-09-21 → 2026-09-23).** Tests A and B done and verified; Test C not yet run. |
+| 3 | Pod-level failure injection | OOMKill, mid-load pod deletion, a bad readiness probe on rollout | **Done (2026-09-21 → 2026-09-23).** All three tests run hands-on and verified: pod deletion under load (zero impact), OOMKill (bypasses probes entirely), a broken readiness probe on rollout (stalls safely, never kills). |
 | 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
 | 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
 
@@ -786,15 +786,74 @@ staying `Running`/`Ready` the entire time, new pods stuck `0/1 Ready`, and
 critically — **zero liveness restarts** on the new pods, since a bad
 readiness probe alone should never trigger a kill.
 
-**Lab:**
+**Lab (as actually run):** no new image needed — the bug this test models
+doesn't require broken app code, just a chart/app disagreement over a
+string. `/readyz` stays correctly implemented; only the *chart's* probe
+config is patched to ask for a path the app never registered. Same
+`kubectl patch` pattern as Test B, and same precondition: **both of Argo's
+self-heal layers (`url-shortener-root` and `prod`) have to be off first**,
+or the patch gets reverted before the rollout can even get stuck.
 ```sh
-kubectl -n url-shortener-prod rollout status deployment/prod-url-shortener &
+kubectl -n argocd patch application url-shortener-root --type merge -p \
+  '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'
+kubectl -n argocd patch application prod --type merge -p \
+  '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'
+
+kubectl -n url-shortener-prod patch deployment prod-url-shortener --type=strategic -p \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"app","readinessProbe":{"httpGet":{"path":"/ready","port":8000},"initialDelaySeconds":3,"periodSeconds":5}}]}}}}'
+
 kubectl -n url-shortener-prod get pods -w
-# trigger the bad rollout (exact mechanism TBD when we get here — likely a
-# throwaway --set override on the readinessProbe path via helm upgrade, same
-# pattern as Test B, to avoid a real commit for a deliberately broken probe)
+kubectl -n url-shortener-prod rollout status deployment/prod-url-shortener
+kubectl -n url-shortener-prod describe pod <the-stuck-pod>
 ```
-Recover with `kubectl -n url-shortener-prod rollout undo deployment/prod-url-shortener`.
+Recover by patching the path back to `/readyz` (not `rollout undo` — the
+live template is what's wrong, and patching it back matches git exactly),
+then re-enable both self-heal flags.
+
+### Findings — Test C (2026-09-23)
+
+Clean run this time — no confounders, because both self-heal levels were
+disabled *before* the fault, from having already paid for that lesson in
+Test B.
+
+**The rollout stalled exactly as predicted, indefinitely:**
+```
+Waiting for deployment "prod-url-shortener" rollout to finish: 1 out of 3 new replicas have been updated...
+```
+Confirmed for over 2 minutes with no progress and no error — a rollout with
+a broken readiness probe doesn't fail loudly, it just never finishes.
+
+**The new pod never reached the Service's endpoint list.** `kubectl -n
+url-shortener-prod get endpoints prod-url-shortener` showed the same 3
+original pod IPs the entire time; the new pod's IP never appeared, even
+though it had been `Running` for minutes.
+
+**The actual proof, straight from the pod's own events:**
+```
+Warning  Unhealthy  35s (x25 over 2m35s)  kubelet  Readiness probe failed: HTTP probe failed with statuscode: 404
+```
+Real confirmation of the exact mechanism: kubelet hit `/ready`, got FastAPI's
+default 404 for an unregistered route, and correctly read that as "not
+ready" — once every 5s (`periodSeconds: 5`), 25 times over the window.
+
+**The two things this test set out to prove, both confirmed:** `Restart
+Count: 0`, container `State: Running` throughout — never touched by
+liveness, which is a fully independent probe (`http-get
+http://:8000/healthz`) that never appears anywhere in this pod's events.
+And public traffic through the real ingress, checked live during the stuck
+rollout: `200 200 200 200 200` — zero visible impact, the whole time.
+
+**What this confirms about the Module 2 fix, on a fresh angle:** a broken
+readiness probe — even a permanently, deterministically broken one that
+will never self-resolve — only ever pulls a pod from traffic and blocks
+forward progress on a rollout. It never kills anything. That's the
+liveness/readiness split from Fixes 1–2 doing exactly its job, verified
+here from an intentional, different trigger than the accidental one that
+originally found the bug.
+
+Module 3 closes here — all three tests done, self-heal cleanup confirmed
+back to normal (`selfHeal: true` on both `prod` and `url-shortener-root`,
+3/3 pods `Running`, 0 restarts).
 
 ## Modules 4–5
 
