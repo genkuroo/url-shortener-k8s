@@ -17,7 +17,7 @@ watched the signals himself, not just read about someone else's run.
 |---|---|---|---|
 | 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
 | 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-17).** The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead, got fixed in two layers (async liveness, capacity-aware readiness), shipped through the real CI/CD pipeline, and verified on both dev and prod. |
-| 3 | Pod-level failure injection | OOMKill, crash loops, bad readiness probes | Not designed yet |
+| 3 | Pod-level failure injection | OOMKill, mid-load pod deletion, a bad readiness probe on rollout | **In progress (2026-09-21 → 2026-09-23).** Tests A and B done and verified; Test C not yet run. |
 | 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
 | 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
 
@@ -554,17 +554,265 @@ version- or resource-specific. Two real options instead of split panes:
   That's why every module here uses raw `kubectl` polling every 2–5s instead
   of Grafana during an active test.
 
-## Modules 3–5
+## Module 3 — Pod-level failure injection
+
+**Why this module is different from 1 and 2:** those both broke something
+*external* to a pod (CPU load, a DB lock) and watched Kubernetes react. This
+module breaks pods *directly* — kills them, starves their memory, ships a
+probe that can never pass — and drills the specific self-healing mechanism
+each failure triggers. It also has a real, unplanned head start: Module 2's
+table-lock test showed liveness and readiness sharing one thread pool with
+request handling, which caused Kubernetes to restart pods that were busy, not
+actually broken. Test C below re-tests that exact scenario now that the
+async `/healthz` + capacity-aware `/readyz` fix is live, to confirm the fix
+actually holds under a fresh angle rather than just the original repro.
+
+Three independent tests, each isolated (run one, let the Deployment settle
+back to steady state, then move to the next):
+
+### Test A — `kubectl delete pod` mid-load
+
+**Mechanism:** a Deployment's whole job is to keep the *desired replica
+count* running, not any specific pod — so deleting one directly (not
+`kubectl scale`, not a crash) is the cleanest way to isolate "how fast and
+how visibly does self-healing happen" from any of the CPU/DB variables in
+Modules 1–2. With 3 prod replicas behind a Service, deleting one should be
+invisible to traffic: the Service already excludes it once it's Terminating
+(kubelet marks it `NotReady` and removes it from Endpoints before the
+container actually stops), and the ReplicaSet controller notices the
+replica-count gap and schedules a replacement immediately.
+
+**What to watch for:** the gap between "pod marked for deletion" and "new
+pod Ready" — that's the real user-facing blast radius, not the deletion
+itself. And whether the Service's endpoint list ever drops below 2 addresses
+(if it does, that's a sign requests hit a `Terminating` pod through a race,
+worth digging into rather than shrugging off).
+
+**Lab (three terminals):**
+```sh
+# 1 — watch pods churn
+kubectl -n url-shortener-prod get pods -w
+
+# 2 — watch which pods the Service actually considers healthy
+kubectl -n url-shortener-prod get endpoints prod-url-shortener -w
+
+# 3 — fire load, then mid-run, delete one pod
+make load-test LOAD_CONCURRENCY=20 LOAD_DURATION=60
+# in a fourth terminal, once load is running:
+kubectl -n url-shortener-prod delete pod <one-of-the-three-pod-names>
+```
+Afterward: `kubectl -n url-shortener-prod get events --sort-by='.lastTimestamp'`
+to read the Killing/Scheduled/Pulled/Started sequence with real timestamps.
+
+### Findings — Test A (2026-09-21)
+
+Two hiccups on the way to a valid run, both worth remembering:
+
+- **First attempt deleted a pod before load was running at all** — proved
+  self-healing works, but not that it's invisible to traffic, since nothing
+  was requesting anything during the gap.
+- **Second attempt deleted a pod *after* the HPA had already scaled to 9**
+  (20 concurrent loops against `/healthz` is enough CPU to cross the 60%
+  target), so a 3-pod outage story became "one of nine," a much smaller
+  blast radius, and no longer testing what Test A set out to test. Waited
+  for the HPA's 5-minute scale-down stabilization back to 3 before retrying.
+
+**Clean run, one continuous script (client probe every ~0.2s against
+`/healthz` through the real ingress, endpoint/pod state polled every 1s, all
+on one shared clock):**
+
+| t (s) | Event |
+|---|---|
+| 0–14 | Load running, 3/3 endpoints, all probes `200` |
+| 14 | `kubectl delete pod` on one of the three |
+| 15 | Endpoints **3 → 2** — the dying pod is `Terminating`; its replacement (`skwh9`) appears at `Init:0/1` in the same second |
+| 16–21 | Replacement is `Running` but `0/1` — not yet in Endpoints, `/readyz` gating it out |
+| 22 | Replacement hits `1/1`, endpoints back to **3** |
+
+**Result: 322/322 probes returned `200`, including all 38 fired during the
+14–22s kill-and-replace window.** Endpoints never dropped below 2. Total
+replacement time ≈ 8s, of which ~1s was the init container
+(`wait-for-postgres`, a `pg_isready` loop gating the app container's start)
+and the rest was the app itself waiting out `/readyz`'s own gate.
+
+**What this run doesn't prove:** the client probe only measured whether new
+requests succeeded, at low concurrency (~5 req/s) — it can't say whether a
+request already in flight on the pod at the moment of deletion survived, and
+the deletion here was graceful (`SIGTERM`, not a hard kill), so the app got
+to finish in-flight work cleanly. See the "graceful vs. ungraceful shutdown"
+discussion below Test B for the harder case.
+
+### Test B — OOMKill
+
+**Mechanism:** set the app's memory *limit* below what it actually uses at
+rest, so the container gets killed by the kernel's cgroup OOM killer, not by
+a Kubernetes probe. This is a fundamentally different failure signature from
+everything in Modules 1–2 — no probe ever gets a chance to fail, because the
+process is killed at the OS level the instant it crosses the memory
+ceiling — and it's worth seeing that distinction live rather than just
+reading about it.
+
+**What to watch for:** `kubectl describe pod` reporting
+`Last State: Terminated, Reason: OOMKilled, Exit Code: 137` — 137 = 128 + 9
+(`SIGKILL`), the kernel giving the process no chance to clean up — and the
+restart count incrementing with **no** corresponding liveness-probe failure
+event, proof this path bypasses probes entirely.
+
+**Lab (as actually run — see findings below for why the original plan
+changed):**
+```sh
+# helm upgrade doesn't work here -- see findings. Argo CD renders this chart
+# itself and applies manifests directly; there's no Helm-tracked release to
+# upgrade ("has no deployed releases"). Patch the live Deployment instead:
+kubectl -n url-shortener-prod patch deployment prod-url-shortener --type=strategic -p \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"app","resources":{"limits":{"memory":"16Mi","cpu":"500m"},"requests":{"memory":"8Mi","cpu":"100m"}}}]}}}}'
+# (requests must drop below the new limit too, or the API server rejects the patch)
+
+kubectl -n url-shortener-prod get pods -w
+kubectl -n url-shortener-prod describe pod <the-oomkilled-pod>
+```
+Revert the same way, with the real values, once done. **Both of Argo's
+self-heal layers need to be off first** — see findings for why; the two
+commands are in the findings section below.
+
+### Findings — Test B (2026-09-22 → 2026-09-23)
+
+This test fought GitOps self-heal for two full rounds before producing clean
+evidence — worth documenting in detail, since the fight itself became the
+more interesting lesson for a while.
+
+**Round 0 — `helm upgrade` doesn't work at all.** `helm list -n
+url-shortener-prod` shows zero releases. Argo CD doesn't install this chart
+via Helm's own release/revision bookkeeping — it renders the chart
+internally and applies the resulting manifests directly, so there's nothing
+for `helm upgrade` to attach to (`Error: UPGRADE FAILED: "prod-url-shortener"
+has no deployed releases`). Switched to `kubectl patch` on the live
+Deployment instead — the same category of move as Test A's `kubectl delete
+pod`, an imperative one-off against a live object rather than a chart
+change.
+
+**Round 1 — self-heal reverted the patch in under a second.** The patched
+pod (new ReplicaSet, new pod-template hash) went `Init:0/1` →
+`Terminating` → `Error` within 3 seconds of being created — too fast to be
+a real OOM. `kubectl -n argocd get application prod -o
+jsonpath='{.status.operationState}'` showed a sync `startedAt`/`finishedAt`
+about one second apart, timestamped right when the patch landed: Argo's
+`prod` Application (`selfHeal: true`, `gitops/apps/prod.yaml:31`) noticed
+the live Deployment drifted from git and reverted it almost instantly. Not
+a 3-minute polling cycle — Argo's app controller watches managed resources
+live via informers, not just on a timer, so drift correction on a resource
+it directly owns can be sub-second.
+
+**Round 2 — disabling `prod`'s own self-heal got reverted too, just as
+fast, by a different app.** `kubectl -n argocd patch application prod
+--type merge -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'`
+reported success, but a follow-up `get` immediately showed `selfHeal: true`
+again. Reason: `prod`'s own sync policy is *itself* declared in git
+(`gitops/apps/prod.yaml`), and that file is watched by the root app-of-apps,
+`url-shortener-root` — which *also* has `selfHeal: true`. Patching a live
+object that a parent Application considers itself the source of truth for
+just gets reverted by the parent, same mechanism, one level up the
+app-of-apps tree. Disabling `url-shortener-root`'s own self-heal (nothing
+sits above it — it's the one thing bootstrapped by hand) is what actually
+let a change to `prod`'s syncPolicy stick.
+
+**Round 3 — turning off root's self-heal wasn't enough on its own.** With
+only `url-shortener-root`'s self-heal off, the memory patch on the
+Deployment kept reappearing and disappearing over roughly 22 minutes (two
+distinct attempts, `wtjdh` then `snnnp`, each a brand-new pod object, never
+the same one restarting). Checked the live Deployment mid-test and found it
+back at the real values (`256Mi`/`128Mi`) — meaning `prod`'s **own**
+`selfHeal: true` (a separate field from `url-shortener-root`'s, governing
+the actual workload resources rather than the Application CR's own spec)
+was still independently reverting the patch, just on its normal reconcile
+cadence rather than instantly. Disabling root's self-heal only stopped root
+from reverting *`prod`'s spec* — it did nothing to stop `prod` from
+reverting *the Deployment*. Two separate self-heal flags, two separate
+levels of the tree, both had to be off at once:
+```sh
+kubectl -n argocd patch application url-shortener-root --type merge -p \
+  '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'
+kubectl -n argocd patch application prod --type merge -p \
+  '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'
+```
+This step was blocked when attempted by Claude Code directly — the tool's
+own auto-mode classifier flagged disabling self-heal as "Security Weaken"
+and required Ethan to run it by hand. A real, deliberate guardrail, same
+category as the `gh workflow run promote.yml` block from Module 2's prod
+promotion — not a bug.
+
+**The clean run, once both flags were actually off:** the same pod
+(`jwxpd`) restarted in place 4 times over ~90s, backoff intervals growing
+(~10s, ~25s, ~40s apart) exactly as `CrashLoopBackOff` is supposed to
+behave. `kubectl describe pod` confirmed:
+```
+Last State:     Terminated
+  Reason:       OOMKilled
+  Exit Code:    137
+Restart Count:  4
+```
+`137 = 128 + 9` (`SIGKILL`) — the kernel's OOM killer, no graceful shutdown
+possible. The init container (`wait-for-postgres`) was unaffected the whole
+time (`Exit Code: 0`, `Reason: Completed`, under a second) since the patch
+only touched the `app` container's resources. **No `Unhealthy`/liveness-probe
+event appears anywhere in this pod's Events** — the clean confirmation of
+what this test set out to show: an OOMKill bypasses Kubernetes' probe
+machinery entirely, a completely different failure path from Module 2's
+probe-starvation bug. The other 3 prod pods stayed `1/1 Running`, 0
+restarts, throughout — the crash-looping pod was never Ready, so it never
+took traffic and never affected the working ones.
+
+**Why this crash loop never self-resolves, on purpose:** the fault here
+isn't a spike or a leak — the 16Mi limit is below what the app needs just to
+finish importing/starting, before it ever serves a request. Every attempt
+fails identically, at the same point, for the same reason, forever, because
+neither side of the mismatch moves on its own. That's a useful diagnostic
+pattern to recognize for real: a service in `CrashLoopBackOff`/`OOMKilled`
+where **every** replica fails near-instantly and identically points at a bad
+config (a limit, most likely), not a memory leak — a genuine leak wouldn't
+kill a brand-new pod within its first second of life. Contrast the three
+shapes an OOMKill can take: every-replica/instant/deterministic (bad
+config, this test), slow-climb-then-die-then-repeat (a leak), or
+correlated-with-traffic-spikes (per-request memory under-provisioned for
+some requests but not others).
+
+**Cleanup:** reverted the Deployment to the real values (`limits:
+{cpu: 500m, memory: 256Mi}`, `requests: {cpu: 100m, memory: 128Mi}`, from
+`values-prod.yaml`) and re-enabled both self-heal flags (`url-shortener-root`
+then `prod`). Confirmed back to 3/3 `Running`, 0 restarts, both Applications
+`selfHeal: true` again.
+
+### Test C — a readiness probe that can never pass, during a rollout
+
+**Mechanism:** ship a new image with `/readyz` deliberately pointed at a
+nonexistent path (a stand-in for "someone's code change broke health checks
+and it shipped anyway"). Kubernetes' rolling-update strategy won't route
+traffic to a new pod until it's `Ready`, and won't scale down an old
+(working) pod until a new one *is* — so a rollout with a broken readiness
+probe should hang forever with zero downtime, not take the app offline. This
+is the real payoff of the liveness/readiness split from Module 2: readiness
+failing should only ever pull a pod from traffic and block a rollout, never
+kill it — confirm that's actually what happens, on purpose this time instead
+of by accident.
+
+**What to watch for:** `kubectl rollout status` never completing, old pods
+staying `Running`/`Ready` the entire time, new pods stuck `0/1 Ready`, and
+critically — **zero liveness restarts** on the new pods, since a bad
+readiness probe alone should never trigger a kill.
+
+**Lab:**
+```sh
+kubectl -n url-shortener-prod rollout status deployment/prod-url-shortener &
+kubectl -n url-shortener-prod get pods -w
+# trigger the bad rollout (exact mechanism TBD when we get here — likely a
+# throwaway --set override on the readinessProbe path via helm upgrade, same
+# pattern as Test B, to avoid a real commit for a deliberately broken probe)
+```
+Recover with `kubectl -n url-shortener-prod rollout undo deployment/prod-url-shortener`.
+
+## Modules 4–5
 
 Not designed yet. Rough intent, to fill in when we get there:
-- **3 (pod failure injection):** `kubectl delete pod` mid-load, a deliberately
-  wrong `readinessProbe`, a memory limit set below actual usage to trigger
-  OOMKill — read `kubectl describe pod` events and restart counts. Already has
-  a real, unplanned head start: Module 2's table-lock test (above) showed
-  liveness/readiness sharing a thread pool with request handling, causing
-  Kubernetes to kill busy-but-healthy pods. Worth designing this module
-  around the liveness-vs-readiness distinction directly — which probe should
-  fail, and whether failing it should restart the pod at all.
 - **4 (network/dependency):** break ingress-nginx routing or simulate a slow
   Postgres (e.g. an artificial `pg_sleep` in a query) and drill the four
   golden signals + "what changed" triage end-to-end.
