@@ -855,11 +855,107 @@ Module 3 closes here — all three tests done, self-heal cleanup confirmed
 back to normal (`selfHeal: true` on both `prod` and `url-shortener-root`,
 3/3 pods `Running`, 0 restarts).
 
-## Modules 4–5
+## Module 4 — Network/dependency failure: the four golden signals, drilled
 
-Not designed yet. Rough intent, to fill in when we get there:
-- **4 (network/dependency):** break ingress-nginx routing or simulate a slow
-  Postgres (e.g. an artificial `pg_sleep` in a query) and drill the four
-  golden signals + "what changed" triage end-to-end.
-- **5 (capstone):** Claude injects an unannounced fault; Ethan diagnoses cold
-  using only the tools from modules 1–4, then writes a short postmortem.
+**Why this module is shaped differently from 1–3:** each of those isolated
+one specific mechanism and confirmed a specific hypothesis, using
+internals-aware diagnostics (thread-limiter internals, `pg_locks`, exact
+`describe pod` fields). This module drills a different skill: given a fault,
+work it *systematically* through the four golden signals — latency,
+traffic, errors, saturation — plus "what changed," the way real on-call
+triage actually starts, using this project's own observability stack
+(Grafana/Prometheus) rather than internals.
+
+**Mechanism:** reuses the trigger-based `pg_sleep` technique from Module 2's
+Follow-up A — injected straight into Postgres, not the app, so "what
+changed" has a real, checkable, correct answer (nothing did, in git or
+Argo). The sleep duration this time is deliberately **3 seconds** —
+*longer* than Fix 3's `statement_timeout` (2s). That's not arbitrary: Fix
+3 was verified once already, but only via a table lock, which exercises
+its `lock_timeout` half. A plain slow-running statement (no lock involved)
+exercises the separate `statement_timeout` half, which has never been
+directly confirmed. This module tests that.
+
+```sql
+CREATE FUNCTION slow_click() RETURNS trigger AS $$
+BEGIN PERFORM pg_sleep(3); RETURN NEW; END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER clicks_slow BEFORE INSERT ON clicks
+  FOR EACH ROW EXECUTE FUNCTION slow_click();
+```
+
+**A prediction worth writing down before running it, so the result can
+actually surprise us:** `app/main.py`'s redirect route
+(`app/main.py:389-400`) has no `try`/`except` around its DB calls. If
+`statement_timeout` correctly cancels the `INSERT` at ~2s, that raises a
+`psycopg2` exception with nothing in this app's code to catch it — it
+should propagate uncaught to FastAPI's default handler. Predicted result:
+a plain, generic `500` at ~2s, not a clean `503` and not the full 3s hang.
+Worth confirming exactly what a real client sees, since "the timeout fired
+correctly" and "the failure is handled *well*" are two different claims.
+
+**Lab:**
+```sh
+# 0 — get a real code to hit
+curl -s -X POST http://urlshortener.localtest.me/api/links \
+  -H 'Content-Type: application/json' -d '{"url":"https://example.com"}'
+
+# 1 — inject the fault directly into Postgres (not the app -- keeps "what
+# changed" honest: nothing in git or Argo will show this)
+kubectl -n url-shortener-prod exec -i prod-url-shortener-postgres-0 -- \
+  psql -U appuser -d urlshortener <<'SQL'
+CREATE FUNCTION slow_click() RETURNS trigger AS $$
+BEGIN PERFORM pg_sleep(3); RETURN NEW; END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER clicks_slow BEFORE INSERT ON clicks
+  FOR EACH ROW EXECUTE FUNCTION slow_click();
+SQL
+
+# 2 -- sanity check ONE request before generating load (the Module 2
+# "wrong code" gotcha applies here too)
+curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' \
+  http://urlshortener.localtest.me/<YOUR_CODE>
+
+# 3 — fire load
+kubectl -n url-shortener-prod run db-load-test --rm -i --restart=Never --image=alpine:3 -- sh -c 'for i in $(seq 1 20); do (while true; do wget -q -S -O- http://prod-url-shortener/<YOUR_CODE> 2>&1 | grep "HTTP/"; done) & done; sleep 60'
+```
+
+**The drill — work these signals in order, don't jump to a conclusion
+early:**
+
+1. **Latency** — `make grafana-ui`, the app dashboard's latency panel, or a
+   plain `curl -w` loop against `/<YOUR_CODE>`.
+2. **Traffic** — request rate, same dashboard (or the load generator's own
+   throughput).
+3. **Errors** — status-code breakdown. This is the one to watch closely
+   given the prediction above — is it `307`s that got slow, or real
+   non-2xx failures, and at what rate?
+4. **Saturation** — `/readyz`'s thread-pool numbers, `kubectl top pods`,
+   live Postgres connections
+   (`kubectl -n url-shortener-prod exec prod-url-shortener-postgres-0 --
+   psql -U appuser -d urlshortener -c "SELECT count(*) FROM
+   pg_stat_activity;"`), the HPA's CPU target.
+5. **"What changed"** — `git log --oneline -10`,
+   `kubectl -n argocd get application prod -o
+   jsonpath='{.status.sync.revision}'`,
+   `kubectl -n url-shortener-prod get events --sort-by=.lastTimestamp`. The
+   correct conclusion here is "nothing" — a live, ad hoc DB-side event with
+   no corresponding deploy. Recognizing *that* is itself the point: not
+   every real incident traces back to something in git.
+
+**Cleanup:**
+```sh
+kubectl -n url-shortener-prod exec -i prod-url-shortener-postgres-0 -- \
+  psql -U appuser -d urlshortener <<'SQL'
+DROP TRIGGER clicks_slow ON clicks;
+DROP FUNCTION slow_click();
+SQL
+```
+
+## Module 5 — Capstone: a blind incident
+
+Not designed yet. Rough intent: Claude injects an unannounced fault (mechanism
+withheld this time, unlike every module so far); Ethan diagnoses cold using
+only the tools and signals drilled in Modules 1–4, then writes a short
+postmortem. Only works coming last, since it's testing whether the earlier
+modules actually stuck rather than teaching something new.
