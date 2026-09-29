@@ -28,6 +28,7 @@ import secrets
 import string
 import sys
 import time
+from contextlib import contextmanager
 
 import anyio
 import psycopg2
@@ -136,6 +137,34 @@ def _connect():
     )
 
 
+@contextmanager
+def _db():
+    """Open a connection for one request and guarantee it's closed afterward.
+
+    Use this everywhere instead of `with _connect() as conn:` directly.
+    psycopg2's own `with connection:` only wraps the *transaction* — it commits
+    on a clean exit and rolls back on an exception, but it never closes the
+    connection either way. With no pooling (see _connect()'s docstring), a
+    connection left open like that just sits there, idle, forever, since
+    nothing else will ever close it.
+
+    Found live in the SRE lab (Module 4, 2026-09-28): under a fault where
+    every request raised (a query blowing past statement_timeout), every one
+    of those requests leaked a connection. `pg_stat_activity` showed dozens of
+    connections sitting idle for 10+ minutes, each one's last statement a bare
+    ROLLBACK — proof the transaction was cleaned up but the connection itself
+    never was. They piled up until Postgres hit max_connections and started
+    rejecting even healthy requests. Not specific to that artificial fault —
+    any unhandled exception on a DB-touching route leaks the same way.
+    """
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _init_db() -> None:
     """Create the tables if they don't exist yet.
 
@@ -143,7 +172,7 @@ def _init_db() -> None:
     migration tool (e.g. Alembic); for two tables, idempotent CREATE TABLE IF NOT
     EXISTS run at startup is enough.
     """
-    with _connect() as conn, conn.cursor() as cur:
+    with _db() as conn, conn.cursor() as cur:
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS links (
@@ -344,7 +373,7 @@ async def readyz():
 @app.post("/api/links", status_code=201)
 def create_link(body: CreateLink):
     """Create a short link for a long URL."""
-    with _connect() as conn, conn.cursor() as cur:
+    with _db() as conn, conn.cursor() as cur:
         code = _new_code(cur)
         cur.execute(
             "INSERT INTO links (code, long_url) VALUES (%s, %s)",
@@ -357,7 +386,7 @@ def create_link(body: CreateLink):
 @app.get("/api/links/{code}/stats")
 def link_stats(code: str):
     """Return click stats for a short link, read from Postgres."""
-    with _connect() as conn, conn.cursor(
+    with _db() as conn, conn.cursor(
         cursor_factory=psycopg2.extras.RealDictCursor
     ) as cur:
         cur.execute(
@@ -389,7 +418,7 @@ def link_stats(code: str):
 @app.get("/{code}")
 def follow(code: str):
     """Redirect a short code to its long URL and record the click."""
-    with _connect() as conn, conn.cursor() as cur:
+    with _db() as conn, conn.cursor() as cur:
         cur.execute("SELECT long_url FROM links WHERE code = %s", (code,))
         row = cur.fetchone()
         if row is None:
