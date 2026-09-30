@@ -19,7 +19,7 @@ watched the signals himself, not just read about someone else's run.
 | 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-17).** The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead, got fixed in two layers (async liveness, capacity-aware readiness), shipped through the real CI/CD pipeline, and verified on both dev and prod. |
 | 3 | Pod-level failure injection | OOMKill, mid-load pod deletion, a bad readiness probe on rollout | **Done (2026-09-21 → 2026-09-23).** All three tests run hands-on and verified: pod deletion under load (zero impact), OOMKill (bypasses probes entirely), a broken readiness probe on rollout (stalls safely, never kills). |
 | 4 | Network / dependency failures | A slow (not stuck) Postgres query, drilled via the four golden signals | **Closed (2026-09-25 → 2026-09-29).** Confirmed the predicted `statement_timeout` behavior, then found an unplanned real bug — a connection leak on every DB route's exception path — fixed, and verified on dev + prod under real load. |
-| 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
+| 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | **Designed (2026-09-30), not yet run.** Rules, scorecard, and postmortem template below; the fault itself is deliberately not written down anywhere. |
 
 ## The resources in play (read this before module 1)
 
@@ -1026,8 +1026,105 @@ hypothesis found a more valuable bug than the one it went looking for.
 
 ## Module 5 — Capstone: a blind incident
 
-Not designed yet. Rough intent: Claude injects an unannounced fault (mechanism
-withheld this time, unlike every module so far); Ethan diagnoses cold using
-only the tools and signals drilled in Modules 1–4, then writes a short
-postmortem. Only works coming last, since it's testing whether the earlier
-modules actually stuck rather than teaching something new.
+Every earlier module announced the fault up front: the drill was *watching*
+a known mechanism play out. Real incidents don't come with the answer
+attached. This module withholds it: Claude injects one unannounced fault,
+Ethan diagnoses it cold with only the tools and signals from Modules 1–4, then
+writes a postmortem. It comes last because it tests whether the earlier
+modules stuck, not anything new.
+
+### Rules of the exercise
+
+**Injection is blind.** The fault is chosen at run time and appears nowhere
+in this repo or in the chat until the incident is closed. Claude injects it
+as an encoded one-shot script at a random moment inside an announced window.
+The command is visible in the session, but its contents aren't readable at a
+glance, and Ethan doesn't decode it. That's the honor-system part.
+
+**The fault may or may not show up in change history.** Checking what
+changed (`git log`, Argo CD sync history, recent rollouts) is a legitimate
+first move and part of the drill. It won't necessarily find anything, since
+plenty of real faults never pass through the deploy pipeline.
+
+**Detection is by symptom, not by alert.** Alertmanager is off in this
+cluster (`gitops/apps/monitoring.yaml`), so nothing will page. Instead a
+synthetic prober runs against the real hot path, and the incident "starts"
+when it shows something wrong:
+
+```bash
+# one terminal, left running for the whole window. CODE = a real prod code.
+CODE=<code>; while true; do printf '%s ' "$(date +%T)"; \
+  curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' \
+  http://urlshortener.localtest.me/$CODE; sleep 2; done
+```
+
+That detection depends on a human watching a terminal is itself a finding.
+It belongs in the postmortem's action items.
+
+**What's fair game:** anything an on-call engineer would have: `kubectl`
+(get / describe / logs / events / top), Grafana and Prometheus, `psql` into
+Postgres, the Argo CD UI, the repo. **Not fair game:** asking Claude what
+was injected. Claude can be asked for a *hint* after 20 minutes without
+progress; every hint gets recorded in the timeline, and that's fine,
+because it's honest data about what hasn't stuck yet.
+
+**Mitigate first, then root-cause.** As in a real incident, restoring
+service is allowed to come before understanding. A `rollout restart` that
+makes the symptom go away counts as a mitigation, not a diagnosis, and the
+postmortem has to say which one it was.
+
+**Done when:** (1) service is restored and the prober is clean for 5
+minutes, (2) Ethan states the root cause *before* Claude reveals it, and
+(3) the postmortem below is written. Any permanent fix ships through the
+normal pipeline (commit → CI → Argo; `promote.yml` for prod), never as a
+live `kubectl edit`.
+
+### Scorecard (filled in after the reveal)
+
+| | |
+|---|---|
+| Fault injected at | *(Claude fills in after the reveal)* |
+| Detected at (prober first showed it) | |
+| Mitigated at (prober clean) | |
+| Root cause stated at | |
+| Hints used | |
+| Root cause correct? | |
+| First signal checked, and was it the right one? | |
+
+### Postmortem template
+
+Blameless: describe what the *system* allowed to happen, not who did it.
+
+```markdown
+## Summary
+One paragraph: what broke, how long, who/what was affected.
+
+## Impact
+Which endpoints, what error rate / latency, dev vs prod, data lost (y/n).
+
+## Timeline
+HH:MM — each observation, hypothesis, action, and result, including the
+wrong turns. The dead ends are the most useful part.
+
+## Detection
+How it was noticed, how long after it started, and what *should* have
+noticed it.
+
+## Root cause
+The mechanism, down to why the system allowed it. Not just "X was broken."
+
+## Resolution
+What mitigated it, what fixed it, and how the fix was verified.
+
+## What went well / what didn't
+
+## Action items
+Concrete, each one prevents recurrence or speeds up detection/diagnosis.
+```
+
+### Status
+
+Designed 2026-09-30. Lab environment rebuilt on the Windows/WSL desktop the
+same day (kind, 16 CPU / ~16 GB) with the Sealed Secrets key restored from the
+Mac cluster, so no values changed. All six Argo apps Synced/Healthy; prod and
+dev verified end to end (create → 307). Not yet run.
