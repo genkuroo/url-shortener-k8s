@@ -18,7 +18,7 @@ watched the signals himself, not just read about someone else's run.
 | 1 | HPA / CPU scaling | `make load-test` hammers `/healthz` (deliberately DB-free) with 80 concurrent loops | **Done (2026-09-04/05).** Ethan ran it hands-on: watched 3→6→9 scale-up, then watched the 5-min scale-down stabilization play out live and correctly read `ScaleDownStabilized` in `describe hpa`. Confirmed the HPA/PDB behavior discussed (below) was default Kubernetes, not project config. |
 | 2 | Database bottlenecks | Hammer `/{code}` (the real hot path — does a Postgres `SELECT` + `INSERT` per request, see below) instead of `/healthz` | **Closed (2026-09-05 → 2026-09-17).** The original connection-exhaustion hypothesis was never cleanly confirmed — a more valuable bug (health-check thread starvation) surfaced instead, got fixed in two layers (async liveness, capacity-aware readiness), shipped through the real CI/CD pipeline, and verified on both dev and prod. |
 | 3 | Pod-level failure injection | OOMKill, mid-load pod deletion, a bad readiness probe on rollout | **Done (2026-09-21 → 2026-09-23).** All three tests run hands-on and verified: pod deletion under load (zero impact), OOMKill (bypasses probes entirely), a broken readiness probe on rollout (stalls safely, never kills). |
-| 4 | Network / dependency failures | Ingress misroutes, timeouts, a slow downstream | Not designed yet |
+| 4 | Network / dependency failures | A slow (not stuck) Postgres query, drilled via the four golden signals | **Closed (2026-09-25 → 2026-09-29).** Confirmed the predicted `statement_timeout` behavior, then found an unplanned real bug — a connection leak on every DB route's exception path — fixed, and verified on dev + prod under real load. |
 | 5 | Capstone: blind incident | Claude breaks something without saying what; full diagnosis from cold | Not designed yet |
 
 ## The resources in play (read this before module 1)
@@ -951,6 +951,78 @@ DROP TRIGGER clicks_slow ON clicks;
 DROP FUNCTION slow_click();
 SQL
 ```
+
+### Findings — Module 4 (2026-09-25 → 2026-09-29)
+
+**The predicted part held exactly.** Sanity check: `500` at `2.3s` — matches
+`statement_timeout` (2000ms) plus a little overhead. Load test: every single
+request failed with `500` for the full run, because the fault is a
+*permanent* 3s tax on every insert, not a transient one — there was never
+going to be a request that succeeded while the trigger was attached. Pods
+stayed `Running`, 0 restarts — liveness genuinely never involved, exactly as
+predicted.
+
+**What wasn't predicted, and became the real finding:** Postgres connections
+climbed for the whole 60s run and ended in `FATAL: sorry, too many clients
+already` — confirmed live: `pg_stat_activity` showed **103** connections
+against a **100** ceiling, **97 idle**, the oldest 10+ minutes old, each
+one's last statement a bare `ROLLBACK`. That combination — transaction
+cleaned up, connection never closed — pointed straight at a real bug rather
+than exhausted capacity from legitimate work.
+
+**Root cause:** `app/main.py`'s DB routes used `with _connect() as conn:`.
+psycopg2's own `with connection:` only wraps the *transaction* (commit on a
+clean exit, rollback on an exception) — it never closes the connection
+either way, regardless of outcome. With no connection pooling in this app,
+the success path mostly got away with it (short-lived objects get garbage
+collected reasonably promptly), but the exception path — which, under this
+fault, was *every single request* — left a live connection sitting open
+with nothing to ever reclaim it. Not specific to the artificial `pg_sleep`:
+any unhandled exception on a DB-touching route leaks the same way, in real
+production use, unrelated to this lab.
+
+This closes Module 2's very first hypothesis for real. "No pooling →
+connection exhaustion" was proposed back at the start of Module 2, never
+confirmed under normal load (connections peaked at 12/100), and set aside in
+favor of the probe-starvation bug that turned out to be there instead.
+Turns out the original hypothesis was true all along — it just needed a
+fault that makes *every* request throw to actually surface it, rather than
+the successful, well-behaved load the earlier tests generated.
+
+**Fix 4 (2026-09-29): a connection-lifecycle context manager.**
+`app/main.py` adds `_db()` — `_connect()` wrapped in a `try`/`finally` so
+`.close()` always runs regardless of outcome — and swaps all four DB call
+sites (`_init_db`, `create_link`, `link_stats`, `follow`) onto it. Minimal
+diff: each call site only changes `_connect()` → `_db()`, so the fix lives
+in exactly one place rather than four repeated `try`/`finally` blocks that
+could drift out of sync or get missed on a future fifth route.
+
+**Verified on dev, against the real running app** (not just an isolated
+script — an early attempt at that showed the isolated-script version of
+this test doesn't reliably reproduce the leak's timing, since Python's own
+reference counting can close a leaked connection anyway once a caught
+exception's traceback goes out of scope; the real bug's persistence depends
+on how long the ASGI server's own error-handling machinery holds that
+traceback alive, which a standalone script doesn't replicate — so this was
+verified the same way every other fix in this lab has been, against the
+real deployed app under the real fault, not a synthetic stand-in):
+re-injected the identical `pg_sleep(3)` trigger, fired the identical 20
+concurrent loops for 45s. **Connections held flat at 26 (baseline 6 + 20
+in-flight) for the entire run, idle count 0 throughout, back to 6 within 5
+seconds of the load ending.** 440/440 requests got `500`, as expected — the
+fix doesn't make the permanently-slow dependency succeed, it stops the
+*failures themselves* from compounding into a second, worse outage.
+
+**Confirmed on prod (2026-09-29),** promoted via `promote.yml`, all 3
+replicas rolled onto the fix cleanly, 0 restarts. Identical fault,
+identical load: connections held flat at 26, idle 0 the entire 45s, back to
+6 within 5s of load ending, 420/420 requests `500`. Public traffic
+(`/healthz` through the real ingress) stayed `200` throughout — the fix
+holds under real traffic, not just the isolated dev repro.
+
+Module 4 closes here, with an unplanned second finding on top of the
+planned one — same shape as Module 2, where the test built to confirm one
+hypothesis found a more valuable bug than the one it went looking for.
 
 ## Module 5 — Capstone: a blind incident
 
