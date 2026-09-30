@@ -233,6 +233,44 @@ pushed to GHCR under its commit SHA, and then written into `values-dev.yaml` and
 `kubectl`, so CI holds no cluster credentials. Prod is a deliberate manual
 promotion (`promote.yml`), not an automatic deploy.
 
+## Pressure-tested it: a fault-injection lab against this exact cluster
+
+Building something and *operating* it are different skills, so once the build
+was done I kept going: a series of modules that deliberately break this
+running cluster — CPU load, a stuck database query, killed pods, a broken
+health check, a slow (not stuck) dependency — and drill the diagnosis the way
+an incident actually demands it: read the signals first, form a hypothesis,
+confirm it, then fix and re-verify against the real pipeline, not a
+`kubectl edit` shortcut. Full runbook, every command run and every result:
+[`docs/SRE_LAB.md`](docs/SRE_LAB.md).
+
+**Four categories tested so far, each against the real running dev/prod
+environments, not a simulation:**
+
+- **CPU / autoscaling** — watched the HPA scale 3→6→9 replicas under load,
+  then hold at 3 through its 5-minute scale-down stabilization window.
+- **Database bottlenecks** — a table lock and an artificial `pg_sleep`,
+  injected straight into Postgres.
+- **Pod-level failure** — a mid-load `kubectl delete pod`, an `OOMKilled`
+  container, and a readiness probe deliberately pointed at a route that
+  doesn't exist.
+- **A slow (not stuck) dependency** — the same `pg_sleep` technique pushed
+  past a query timeout, drilled through the four golden signals instead of
+  internals.
+
+**The two most interesting results were bugs I wasn't looking for** — found by
+breaking the system on purpose, fixed, shipped through the same CI/CD →
+GitOps pipeline as every other change here, and re-verified against real
+load afterward, on both dev and prod:
+
+| Bug | Root cause | Fix | Verified |
+|---|---|---|---|
+| **A healthy, busy pod getting killed** | `/healthz` (liveness) shared FastAPI's worker-thread pool with every database route — a stuck query starved the pool, the liveness probe couldn't run, and Kubernetes killed a pod that was never actually broken | Split liveness (`/healthz`, now `async`, never touches the DB) from a new capacity-aware `/readyz`, plus `lock_timeout`/`statement_timeout` so a stuck query fails fast instead of holding a thread forever | **9 restarts in 90s → 0**, identical fault, on dev. On prod, saturating one of three replicas pulled *only* that pod from the Service — public traffic never dropped a request |
+| **A silent connection leak** | psycopg2's `with connection:` only wraps the transaction (commit/rollback) — it never closes the connection. Under a fault where every request raised, every failure leaked one, with no pooling to reclaim it | A `_db()` context manager guaranteeing `.close()` in a `finally`, regardless of outcome, on every DB route | **103/100 Postgres connections, prod briefly rejecting real traffic → flat at baseline**, identical fault + 20 concurrent requests, on both dev and prod |
+
+Next up: a blind capstone module where the fault isn't announced up front —
+full diagnosis from cold, using only what the earlier modules taught.
+
 ## Secrets: the password lives in the repo, encrypted
 
 Every other piece of desired state here is safe to publish. The database password
